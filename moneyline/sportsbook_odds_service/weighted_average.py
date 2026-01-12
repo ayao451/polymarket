@@ -5,10 +5,11 @@ from typing import Dict, Iterable, Mapping, Optional, Sequence
 
 
 # Edit this mapping whenever you want to tune weights.
-# - Pinnacle is fixed at 50% by default.
-# - Any present sportsbook not listed here will share the remaining weight equally.
+# Current setting:
+# - Pinnacle is 100%
+# - All other sportsbooks are 0%
 SPORTSBOOK_WEIGHTS: Dict[str, float] = {
-    "pinnacle": 0.50,
+    "pinnacle": 1.0,
 }
 
 

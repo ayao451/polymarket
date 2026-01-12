@@ -181,7 +181,19 @@ class PolymarketMarketAnalyzer:
         if not event:
             print(f"Failed to fetch event: {event_slug}")
             return []
-        
+
+        return self.analyze_event(event, market_slug=market_slug)
+
+    def analyze_event(self, event: Dict, market_slug: Optional[str] = None) -> List[MarketOdds]:
+        """
+        Analyze markets for a pre-fetched Gamma event object.
+
+        Args:
+            event: Event dictionary as returned by Gamma API.
+            market_slug: If provided, only analyze this specific market within the event.
+        """
+        event_slug = str(event.get("slug", "") or "")
+
         # Extract token IDs (for all markets)
         token_data = self.extract_token_ids(event)
 
@@ -191,19 +203,19 @@ class PolymarketMarketAnalyzer:
             if not token_data:
                 print(f"Failed to find market '{market_slug}' in event '{event_slug}'")
                 return []
-        
+
         # Analyze each market
         results: List[MarketOdds] = []
         print("Fetching orderbooks and calculating statistics...\n")
-        
+
         for token_info in token_data:
             token_id = token_info["token_id"]
-            
+
             orderbook = self.fetch_orderbook(token_id)
-            
+
             if orderbook:
                 stats = self.calculate_market_stats(orderbook)
-                
+
                 market_label = f"{token_info['question'][:50]} ({token_info.get('outcome', 'Unknown')})"
                 results.append(
                     MarketOdds(
@@ -216,7 +228,7 @@ class PolymarketMarketAnalyzer:
                         spread=(float(stats["spread"]) if stats["spread"] is not None else None),
                     )
                 )
-        
+
         return results
     
     def display_results(self, results: List[MarketOdds]):

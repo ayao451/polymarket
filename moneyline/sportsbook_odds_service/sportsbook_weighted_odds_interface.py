@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Interface to fetch weighted odds for NBA games from The Odds API.
+Interface to fetch weighted odds from The Odds API.
 
 Given two teams and a date, fetches odds from The Odds API,
 applies weighted averaging across multiple sportsbooks,
@@ -14,6 +14,7 @@ from datetime import date
 from typing import Optional
 
 from .fetch_game_odds import (
+    NCAA_SPORT_KEY,
     NBA_SPORT_KEY,
     MONEYLINE_MARKET_KEY,
     find_event_for_teams_today,
@@ -50,7 +51,7 @@ class MoneylineOdds:
 
 
 class SportsbookWeightedOddsInterface:
-    """Interface to fetch weighted odds for NBA games from The Odds API."""
+    """Interface to fetch weighted odds from The Odds API."""
     
     def __init__(self):
         self.odds_connector = theOddsAPIConnector()
@@ -60,7 +61,8 @@ class SportsbookWeightedOddsInterface:
         team_a: str, 
         team_b: str, 
         play_date: Optional[date] = None,
-        decimals: int = 6
+        decimals: int = 6,
+        sport_key: str = NBA_SPORT_KEY,
     ) -> Optional[MoneylineOdds]:
         """
         Get moneyline odds for an NBA game.
@@ -70,19 +72,26 @@ class SportsbookWeightedOddsInterface:
             team_b: Second team name (e.g., "Detroit Pistons")
             play_date: Date of the game (defaults to today if None)
             decimals: Number of decimal places for odds (default: 6)
+            sport_key: The Odds API sport key (defaults to NBA). Example: NCAA_SPORT_KEY.
             
         Returns:
             MoneylineOdds (with `.to_string()`) or None if error
         """
         try:
             # Fetch odds from The Odds API
-            events = self.odds_connector.get_odds(NBA_SPORT_KEY, MONEYLINE_MARKET_KEY)
+            if not sport_key:
+                sport_key = NBA_SPORT_KEY
+            events = self.odds_connector.get_odds(sport_key, MONEYLINE_MARKET_KEY)
 
             # Find matching event
             event = find_event_for_teams_today(events, team_a, team_b, local_date=play_date)
             if not event:
                 date_str = play_date.strftime("%Y-%m-%d") if play_date else "today"
-                print(f"No matching event found for {team_a} vs {team_b} on {date_str}")
+                sport_label = "NBA" if sport_key == NBA_SPORT_KEY else str(sport_key)
+                print(
+                    f"No matching event found for {team_a} vs {team_b} on {date_str} "
+                    f"(sport={sport_label})"
+                )
                 return None
 
             # Extract moneyline odds from all books

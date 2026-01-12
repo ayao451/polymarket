@@ -14,8 +14,8 @@ Credentials are read from `config_local.py` (optional) or env vars:
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
-import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -34,6 +34,9 @@ class TradeExecutionResult:
     price: float
     size: float
     order_type: OrderType
+    team: Optional[str] = None
+    game: Optional[str] = None
+    expected_payout_per_1: Optional[float] = None
     response: Optional[Any] = None
     error: Optional[str] = None
 
@@ -50,6 +53,18 @@ class TradeExecutorService:
                 self._trader = None
                 self._init_error = str(e)
 
+    def get_usdc_balance(self) -> Optional[float]:
+        """
+        Best-effort fetch of current collateral (USDC) balance.
+        Returns None if unavailable.
+        """
+        if self._trader is None:
+            return None
+        try:
+            return float(self._trader.get_usdc_balance())
+        except Exception:
+            return None
+
     def _fail(
         self,
         *,
@@ -58,6 +73,9 @@ class TradeExecutorService:
         price: float,
         size: float,
         order_type: OrderType,
+        team: Optional[str] = None,
+        game: Optional[str] = None,
+        expected_payout_per_1: Optional[float] = None,
         error: str,
     ) -> TradeExecutionResult:
         return TradeExecutionResult(
@@ -67,35 +85,96 @@ class TradeExecutorService:
             price=price,
             size=size,
             order_type=order_type,
+            team=team,
+            game=game,
+            expected_payout_per_1=expected_payout_per_1,
             response=None,
             error=error,
         )
 
     @staticmethod
-    def _successful_trades_path() -> str:
+    def _trades_csv_path() -> str:
         # Write next to `moneyline/main.py`
+        moneyline_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        return os.path.join(moneyline_root, "trades.csv")
+
+    @staticmethod
+    def _successful_trades_path() -> str:
+        """
+        Legacy location (deprecated).
+        """
         moneyline_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         return os.path.join(moneyline_root, "successful_trades.txt")
 
     @classmethod
     def _append_successful_trade(cls, result: TradeExecutionResult) -> None:
         """
-        Best-effort append of a successful trade to a log file (JSONL).
+        Best-effort append of a successful trade to a CSV log file.
         Never raises.
         """
         try:
-            payload = {
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "token_id": result.token_id,
-                "side": result.side,
-                "price": result.price,
-                "size": result.size,
-                "order_type": str(result.order_type),
-                "response": str(result.response) if result.response is not None else None,
+            ts = datetime.now(timezone.utc).isoformat()
+            order_type = getattr(result.order_type, "name", None) or str(result.order_type)
+
+            status = None
+            order_id = None
+            tx_hashes = None
+            success = None
+
+            resp = result.response
+            if isinstance(resp, dict):
+                status = resp.get("status")
+                order_id = resp.get("orderID") or resp.get("orderId")
+                tx_hashes = resp.get("transactionsHashes") or resp.get("transactionHashes")
+                success = resp.get("success")
+
+            # Human-readable financials (approx; ignores fees)
+            amount = float(result.price) * float(result.size)  # USDC spent for BUY
+            payout = float(result.size)  # $1 per token if outcome wins
+            profit = payout - amount
+
+            team = (result.team or "").strip() or "UNKNOWN_TEAM"
+            game = (result.game or "").strip()
+
+            # Ensure tx_hashes is a string for CSV.
+            if isinstance(tx_hashes, (list, tuple, dict)):
+                tx_hashes_s = str(tx_hashes)
+            elif tx_hashes is None:
+                tx_hashes_s = ""
+            else:
+                tx_hashes_s = str(tx_hashes)
+
+            row = {
+                "ts": ts,
+                "team": team,
+                "game": game,
+                "amount": f"{amount:.2f}",
+                "payout": f"{payout:.2f}",
+                "profit": f"{profit:.2f}",
+                "side": str(result.side),
+                "price": f"{float(result.price):.4f}",
+                "size": str(result.size),
+                "type": str(order_type),
+                "expected_payout_per_$1": (
+                    f"{float(result.expected_payout_per_1):.4f}"
+                    if result.expected_payout_per_1 is not None
+                    else ""
+                ),
+                "success": ("" if success is None else str(success)),
+                "status": ("" if status is None else str(status)),
+                "order_id": ("" if order_id is None else str(order_id)),
+                "tx_hashes": tx_hashes_s,
+                "token_id": str(result.token_id),
             }
-            path = cls._successful_trades_path()
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(payload) + "\n")
+
+            path = cls._trades_csv_path()
+            fieldnames = list(row.keys())
+            needs_header = (not os.path.exists(path)) or (os.path.getsize(path) == 0)
+            with open(path, "a", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                if needs_header:
+                    writer.writeheader()
+                writer.writerow(row)
         except Exception:
             # Intentionally swallow all logging errors
             return
@@ -108,6 +187,9 @@ class TradeExecutorService:
         price: float,
         size: float,
         order_type: OrderType,
+        team: Optional[str] = None,
+        game: Optional[str] = None,
+        expected_payout_per_1: Optional[float] = None,
     ) -> TradeExecutionResult:
         """
         Execute an order on Polymarket CLOB.
@@ -121,6 +203,9 @@ class TradeExecutorService:
                 price=price,
                 size=size,
                 order_type=order_type,
+                team=team,
+                game=game,
+                expected_payout_per_1=expected_payout_per_1,
                 error=self._init_error or "Trade executor not initialized",
             )
 
@@ -131,6 +216,9 @@ class TradeExecutorService:
                 price=price,
                 size=size,
                 order_type=order_type,
+                team=team,
+                game=game,
+                expected_payout_per_1=expected_payout_per_1,
                 error=f"Invalid side '{side}'. Expected BUY or SELL.",
             )
         if not token_id:
@@ -140,6 +228,9 @@ class TradeExecutorService:
                 price=price,
                 size=size,
                 order_type=order_type,
+                team=team,
+                game=game,
+                expected_payout_per_1=expected_payout_per_1,
                 error="token_id is required",
             )
         if price <= 0:
@@ -149,6 +240,9 @@ class TradeExecutorService:
                 price=price,
                 size=size,
                 order_type=order_type,
+                team=team,
+                game=game,
+                expected_payout_per_1=expected_payout_per_1,
                 error="price must be > 0",
             )
         if size <= 0:
@@ -158,6 +252,9 @@ class TradeExecutorService:
                 price=price,
                 size=size,
                 order_type=order_type,
+                team=team,
+                game=game,
+                expected_payout_per_1=expected_payout_per_1,
                 error="size must be > 0",
             )
 
@@ -176,6 +273,9 @@ class TradeExecutorService:
                 price=price,
                 size=size,
                 order_type=order_type,
+                team=team,
+                game=game,
+                expected_payout_per_1=expected_payout_per_1,
                 response=resp,
                 error=None,
             )
@@ -188,6 +288,9 @@ class TradeExecutorService:
                 price=price,
                 size=size,
                 order_type=order_type,
+                team=team,
+                game=game,
+                expected_payout_per_1=expected_payout_per_1,
                 error=f"{e} ({type(e).__name__})",
             )
 

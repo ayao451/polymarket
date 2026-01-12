@@ -50,7 +50,7 @@ analyzer.display_results(results)  # Prints formatted table
 - `polymarket_odds_interface.py` - Main interface for fetching market odds
 - `polymarket_market_analyzer.py` - Standalone market analyzer class
 - `fetch_market_data.py` - Script with example usage
-- `find_nba_game.py` - Utility to find NBA games on Polymarket
+- `find_game.py` - Utility to find sports games on Polymarket
 
 ## Dependencies
 

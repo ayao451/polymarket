@@ -2,12 +2,22 @@
 """
 Value bet discovery service.
 
-A value bet exists when Polymarket's best ask for a side is at least `min_edge`
-cheaper than the sportsbook quote for that same side.
+A value bet exists when the expected payout exceeds the stake ($1).
+
+We compute "true" (no-vig) probabilities from the sportsbook's two-way odds using
+the Power de-vig method, then compare that to the Polymarket price.
+
+If you buy 1 token at price `x` (Polymarket best ask), payout is $1 if it wins.
+So the expected payout for a $1 stake (buying ~1/x tokens) is:
+
+    expected_payout = p_true * (1 / x)
+
+If expected_payout > 1, the bet has positive expected value.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -19,20 +29,23 @@ from polymarket_odds_service.polymarket_market_analyzer import MarketOdds
 class ValueBet:
     team: str
     token_id: str
-    sportsbook_cost_to_win_1: float
+    true_prob: float
     polymarket_best_ask: float
-    edge: float  # sportsbook_cost_to_win_1 - polymarket_best_ask
+    expected_payout_per_1: float  # expected payout for a $1 stake (gross, before fees)
 
     def to_string(self, decimals: int = 4) -> str:
         fmt = f".{max(0, int(decimals))}f"
         return (
             f"{self.team}: polymarket_ask={format(self.polymarket_best_ask, fmt)}, "
-            f"sportsbook={format(self.sportsbook_cost_to_win_1, fmt)}, "
-            f"edge={format(self.edge, fmt)}"
+            f"true_prob={format(self.true_prob, fmt)}, "
+            f"expected_payout_per_$1={format(self.expected_payout_per_1, fmt)}"
         )
 
 
 class ValueBetService:
+    MIN_TRUE_PROB = 0.05  # don't bet extreme longshots (<5% true win probability)
+    MIN_EXPECTED_PAYOUT_PER_1 = 1.01  # require >1% expected edge on $1 stake
+
     def __init__(
         self,
         away_team: str,
@@ -87,31 +100,56 @@ class ValueBetService:
         inside = market_label.split("(", 1)[1].rsplit(")", 1)[0].strip()
         return inside or None
 
-    def _sportsbook_quote_for_outcome(self, outcome_team: str) -> Optional[float]:
+    @staticmethod
+    def _devig(q1: float, q2: float) -> Optional[tuple[float, float]]:
         """
-        Return sportsbook cost_to_win_1 for this outcome team (away/home), or None if unknown.
+        De-vig for a 2-outcome market using the standard proportional method.
+
+        Inputs q1,q2 are the raw implied probabilities (with vig), e.g. q=1/decimal_odds.
+        We normalize them so they sum to 1:
+
+            p1 = q1 / (q1 + q2)
+            p2 = q2 / (q1 + q2)
+
+        This matches the "normalize implied probabilities by total overround" method.
+        """
+        try:
+            q1 = float(q1)
+            q2 = float(q2)
+        except (TypeError, ValueError):
+            return None
+        if not (math.isfinite(q1) and math.isfinite(q2)):
+            return None
+        if q1 <= 0 or q2 <= 0:
+            return None
+        total = q1 + q2
+        if total <= 0:
+            return None
+        return (q1 / total), (q2 / total)
+
+    def _true_prob_for_outcome(self, outcome_team: str) -> Optional[float]:
+        """
+        Return the no-vig (true) probability for this outcome (away/home), or None if unknown.
         """
         if self.sportsbook_result is None:
             return None
 
-        sportsbook = self.sportsbook_result
+        sb = self.sportsbook_result
+        devigged = self._devig(sb.away_cost_to_win_1, sb.home_cost_to_win_1)
+        if devigged is None:
+            return None
+        p_away, p_home = devigged
+
         if self._team_matches_outcome(self.away_team, outcome_team):
-            return float(sportsbook.away_cost_to_win_1)
+            return float(p_away)
         if self._team_matches_outcome(self.home_team, outcome_team):
-            return float(sportsbook.home_cost_to_win_1)
+            return float(p_home)
         return None
 
-    def discover_value_bets(self, min_edge: float = 0.02) -> List[ValueBet]:
+    def discover_value_bets(self) -> List[ValueBet]:
         """
-        Discover value bets between sportsbook and Polymarket moneyline.
-
-        A value bet exists when:
-            polymarket_best_ask <= sportsbook_cost_to_win_1 - min_edge
+        Discover value bets between sportsbook (de-vigged) and Polymarket moneyline.
         """
-        min_edge = float(min_edge)
-        if min_edge < 0:
-            min_edge = 0.0
-
         value_bets: List[ValueBet] = []
 
         for m in self.polymarket_results:
@@ -122,23 +160,34 @@ class ValueBetService:
             if not outcome_team:
                 continue
 
-            sportsbook_quote = self._sportsbook_quote_for_outcome(outcome_team)
-            if sportsbook_quote is None:
+            p_true = self._true_prob_for_outcome(outcome_team)
+            if p_true is None:
+                continue
+            if float(p_true) < self.MIN_TRUE_PROB:
                 continue
 
             polymarket_ask = float(m.best_ask)
-            edge = sportsbook_quote - polymarket_ask
-            if edge >= min_edge:
+            if polymarket_ask <= 0:
+                continue
+
+            payout_per_1 = 1.0 / polymarket_ask  # $ payout if the $1 stake wins
+            expected_payout = float(p_true) * float(payout_per_1)
+
+            # Value bet if expected payout exceeds threshold (stake is $1).
+            if expected_payout > self.MIN_EXPECTED_PAYOUT_PER_1:
                 value_bets.append(
                     ValueBet(
                         team=outcome_team,
                         token_id=m.token_id,
-                        sportsbook_cost_to_win_1=sportsbook_quote,
+                        true_prob=float(p_true),
                         polymarket_best_ask=polymarket_ask,
-                        edge=edge,
+                        expected_payout_per_1=expected_payout,
                     )
                 )
 
-        return sorted(value_bets, key=lambda vb: vb.edge, reverse=True)
+        # Sort by highest expected profit per $1 stake.
+        return sorted(
+            value_bets, key=lambda vb: (vb.expected_payout_per_1 - 1.0), reverse=True
+        )
 
 

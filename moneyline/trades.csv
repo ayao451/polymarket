@@ -1,0 +1,2 @@
+ts,team,game,amount,payout,profit,side,price,size,type,expected_payout_per_$1,success,status,order_id,tx_hashes,token_id
+2026-01-12T01:45:10.402116+00:00,Incarnate Word Cardinals,Incarnate Word Cardinals @ Stephen F. Austin Lumberjacks,1.26,6.00,4.74,BUY,0.2100,6.0,FOK,1.1498,True,matched,0x79c2a1174ab7cb03fa169c88b15ac8d2b86a5b208a2cc010c6011dc48cbc206b,['0x8505810fd303e40a1a2feab8bdeaf9c9ef6497e3d036b4bf9c5121ee70c5a8b3'],98056121335488864694179481246017275747811753313273046142801821868361809622912

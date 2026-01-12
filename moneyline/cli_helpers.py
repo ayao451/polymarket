@@ -67,7 +67,7 @@ def _validate_environment() -> Optional[str]:
         return (
             "API_KEY environment variable is not set.\n"
             "Please set it using: export API_KEY='your_api_key_here'\n"
-            "Or create a .env file in the sportsbook_odds_service directory with: API_KEY=your_api_key_here"
+            "Or create a .env file in the nba/sportsbook_odds_service directory with: API_KEY=your_api_key_here"
         )
     if len(api_key.strip()) == 0:
         return "API_KEY environment variable is empty."

@@ -16,6 +16,10 @@ from .weighted_average import (
 
 
 NBA_SPORT_KEY = "basketball_nba"
+NCAA_SPORT_KEY = "basketball_ncaab"
+NFL_SPORT_KEY = "americanfootball_nfl"
+NCAAF_SPORT_KEY = "americanfootball_ncaaf"
+NHL_SPORT_KEY = "icehockey_nhl"
 MONEYLINE_MARKET_KEY = "h2h"
 
 

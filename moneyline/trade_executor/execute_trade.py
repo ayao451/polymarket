@@ -138,6 +138,28 @@ class PolymarketTrader:
         
         return resp
 
+    def get_usdc_balance(self) -> float:
+        """
+        Return current collateral (USDC) balance as a float.
+        """
+        try:
+            # Most py_clob_client versions expose these in clob_types
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType  # type: ignore
+        except Exception as e:
+            raise RuntimeError(f"Cannot import BalanceAllowanceParams/AssetType: {e}")
+
+        response = self.client.get_balance_allowance(
+            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        )
+        bal = response.get("balance")
+        if bal is None:
+            raise RuntimeError(f"Unexpected balance response: {response}")
+        bal_f = float(bal)
+        # Heuristic: if returned in base units (micro-USDC), convert.
+        if bal_f > 1_000_000:
+            bal_f = bal_f / 1_000_000.0
+        return bal_f
+
     def execute_trade_by_outcome(self, side, price, size, event_slug, outcome, order_type, sub_slug=None):
         """
         Convenience wrapper that DOES refetch event data to resolve token_id.
