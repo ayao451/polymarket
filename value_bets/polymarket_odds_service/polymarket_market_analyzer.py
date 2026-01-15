@@ -61,6 +61,159 @@ class PolymarketMarketAnalyzer:
         except requests.exceptions.RequestException as e:
             print(f"Error fetching event: {e}")
             return None
+
+    @staticmethod
+    def spread_market_slugs_from_event(event: Dict) -> List[str]:
+        """
+        Given a Gamma event payload (from /events/slug/{event_slug}), return the list of
+        spread market slugs, e.g. "nba-phx-mia-2026-01-13-spread-home-1pt5".
+
+        Heuristics (to avoid missing spread markets):
+        - include if `question` contains "spread" (case-insensitive), OR
+        - include if `sportsMarketType` contains "spread", OR
+        - include if slug contains "-spread-"
+
+        Exclusions:
+        - exclude first half spreads (e.g. "1H Spread" / "first_half_spreads" / slug contains "-1h-")
+        """
+        if not isinstance(event, dict):
+            return []
+
+        out: List[str] = []
+        markets = event.get("markets", []) or []
+        # NOTE: keep this lightweight; callers may print summaries as needed.
+        for m in markets:
+            try:
+                if not isinstance(m, dict):
+                    continue
+                q = str(m.get("question") or "")
+                smt = str(m.get("sportsMarketType") or "")
+                slug = str(m.get("slug") or "").strip()
+
+                # Exclude 1H / first half spread markets; we only want full game spreads.
+                q_low = q.lower()
+                smt_low = smt.lower()
+                slug_low = slug.lower()
+                is_first_half = (
+                    q_low.startswith("1h ")
+                    or q_low.startswith("1hspread")
+                    or "1h spread" in q_low
+                    or "first half" in q_low
+                    or "first_half" in smt_low
+                    or "first half" in smt_low
+                    or "-1h-" in slug_low
+                    or slug_low.startswith("1h-")
+                )
+                if is_first_half:
+                    continue
+
+                is_spread = (
+                    ("spread" in q_low)
+                    or ("spread" in smt_low)
+                    or ("-spread-" in slug_low)
+                )
+                if not is_spread:
+                    continue
+                if slug:
+                    out.append(slug)
+            except Exception:
+                continue
+
+        # De-dup while keeping order
+        seen = set()
+        deduped: List[str] = []
+        for s in out:
+            if s in seen:
+                continue
+            seen.add(s)
+            deduped.append(s)
+        return deduped
+
+    @staticmethod
+    def totals_market_slugs_from_event(event: Dict) -> List[str]:
+        """
+        Given a Gamma event payload (from /events/slug/{event_slug}), return the list of
+        full-game totals market slugs, e.g. "nba-sas-okc-2026-01-13-total-229pt5".
+
+        Heuristics:
+        - include if question contains "o/u" or "total" (case-insensitive), OR
+        - include if sportsMarketType contains "total", OR
+        - include if slug contains "-total-"
+
+        Exclusions:
+        - exclude first half totals (e.g. "1H O/U" / "first_half_totals" / slug contains "-1h-")
+        """
+        if not isinstance(event, dict):
+            return []
+
+        out: List[str] = []
+        markets = event.get("markets", []) or []
+        for m in markets:
+            try:
+                if not isinstance(m, dict):
+                    continue
+                q = str(m.get("question") or "")
+                smt = str(m.get("sportsMarketType") or "")
+                slug = str(m.get("slug") or "").strip()
+
+                q_low = q.lower()
+                smt_low = smt.lower()
+                slug_low = slug.lower()
+
+                is_first_half = (
+                    q_low.startswith("1h ")
+                    or "1h o/u" in q_low
+                    or "1h total" in q_low
+                    or "first half" in q_low
+                    or "first_half" in smt_low
+                    or "first half" in smt_low
+                    or "-1h-" in slug_low
+                    or slug_low.startswith("1h-")
+                )
+                if is_first_half:
+                    continue
+
+                is_total = (
+                    ("o/u" in q_low)
+                    or ("total" in q_low)
+                    or ("total" in smt_low)
+                    or ("-total-" in slug_low)
+                )
+                if not is_total:
+                    continue
+                if slug:
+                    out.append(slug)
+            except Exception:
+                continue
+
+        seen = set()
+        deduped: List[str] = []
+        for s in out:
+            if s in seen:
+                continue
+            seen.add(s)
+            deduped.append(s)
+        return deduped
+
+    def get_spread_market_slugs_for_event(self, event_slug: str) -> List[str]:
+        """
+        Return all spread market slugs for a given Polymarket sports event slug.
+
+        Gamma API flow:
+          1) GET /events/slug/{event_slug}
+          2) filter event["markets"] where sportsMarketType == "spread"
+          3) return each market["slug"]
+
+        Errors are handled gracefully (returns []).
+        """
+        if not event_slug:
+            return []
+
+        event = self.fetch_event_by_slug(event_slug)
+        if not event:
+            return []
+
+        return self.spread_market_slugs_from_event(event)
     
     def extract_token_ids(self, event: Dict) -> List[Dict]:
         """
@@ -99,7 +252,6 @@ class PolymarketMarketAnalyzer:
             except json.JSONDecodeError:
                 continue
         
-        print(f"Extracted {len(token_data)} token IDs from markets\n")
         return token_data
     
     def fetch_orderbook(self, token_id: str) -> Optional[Dict]:
@@ -206,7 +358,6 @@ class PolymarketMarketAnalyzer:
 
         # Analyze each market
         results: List[MarketOdds] = []
-        print("Fetching orderbooks and calculating statistics...\n")
 
         for token_info in token_data:
             token_id = token_info["token_id"]

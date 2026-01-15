@@ -109,6 +109,82 @@ class PolymarketOddsInterface:
 
         return False
 
+    @staticmethod
+    def _parse_spread_outcome(text: str) -> Optional[tuple[str, float]]:
+        """
+        Parse a spread outcome label into (team, point).
+
+        Examples we support:
+        - "Bulls (+6.5)" -> ("Bulls", +6.5)
+        - "Bulls (-11.0)" -> ("Bulls", -11.0)
+        - "Bulls +6.5" -> ("Bulls", +6.5)
+        - "Bulls -6.5" -> ("Bulls", -6.5)
+        """
+        s = str(text or "").strip()
+        if not s:
+            return None
+        low = s.lower()
+        if low.startswith("over ") or low.startswith("under "):
+            return None
+
+        m = re.match(r"^(?P<team>.+?)\s*\(\s*(?P<pt>[+-]?\d+(?:\.\d+)?)\s*\)\s*$", s)
+        if not m:
+            m = re.match(r"^(?P<team>.+?)\s+(?P<pt>[+-]\d+(?:\.\d+)?)\s*$", s)
+        if not m:
+            return None
+
+        team = (m.group("team") or "").strip()
+        pt_s = (m.group("pt") or "").strip()
+        if not team or not pt_s:
+            return None
+        try:
+            pt = float(pt_s)
+        except ValueError:
+            return None
+        return team, float(pt)
+
+    def _select_spread_market_slugs(self, event: Dict) -> List[str]:
+        """
+        Return market slugs for 2-outcome spread markets matching this matchup.
+        """
+        slugs: List[str] = []
+        markets = event.get("markets", []) or []
+        for m in markets:
+            slug = str(m.get("slug") or "").strip()
+            if not slug:
+                continue
+
+            outcomes_raw = m.get("outcomes", "[]")
+            try:
+                outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
+            except Exception:
+                continue
+            if not isinstance(outcomes, list) or len(outcomes) != 2:
+                continue
+
+            p1 = self._parse_spread_outcome(str(outcomes[0]))
+            p2 = self._parse_spread_outcome(str(outcomes[1]))
+            if not p1 or not p2:
+                continue
+
+            team1, pt1 = p1
+            team2, pt2 = p2
+
+            # Must match the two teams (ignoring handicap), and must not be totals.
+            if not (
+                (self._team_matches_outcome(self.away_team, team1) and self._team_matches_outcome(self.home_team, team2))
+                or (self._team_matches_outcome(self.home_team, team1) and self._team_matches_outcome(self.away_team, team2))
+            ):
+                continue
+
+            # A typical spread market has opposite lines.
+            # If it doesn't, it's still likely a handicap variant; keep it.
+            _ = (pt1, pt2)
+
+            slugs.append(slug)
+
+        return slugs
+
     def _select_moneyline_market_slug(self, event: Dict) -> Optional[str]:
         """
         Return the first 2-outcome market whose outcomes match (away, home).
@@ -182,4 +258,69 @@ class PolymarketOddsInterface:
             return []
 
         return self.analyzer.analyze_event(event, market_slug=market_slug)
+
+    def get_spread_odds(self) -> List[MarketOdds]:
+        """
+        Get spread market odds for a Polymarket event (all spread lines for this matchup).
+        """
+        if not self.event_slug:
+            return []
+        event = self.analyzer.fetch_event_by_slug(self.event_slug)
+        if not event:
+            return []
+
+        # Use the event payload from:
+        #   GET https://gamma-api.polymarket.com/events/slug/{event_slug}
+        # and pull spread market slugs directly from its `markets` array.
+        slugs = self.analyzer.spread_market_slugs_from_event(event)
+        if not slugs:
+            # Retry once (Gamma can be eventually consistent for sub-markets).
+            try:
+                event = self.analyzer.fetch_event_by_slug(self.event_slug) or event
+            except Exception:
+                pass
+            slugs = self.analyzer.spread_market_slugs_from_event(event)
+
+        print(
+            f"Found {len(slugs)} spread market slugs for "
+            f"{self.away_team} vs {self.home_team}: {slugs}"
+        )
+        if not slugs:
+            return []
+
+        results: List[MarketOdds] = []
+        for slug in slugs:
+            results.extend(self.analyzer.analyze_event(event, market_slug=slug))
+        return results
+
+    def get_totals_odds(self) -> List[MarketOdds]:
+        """
+        Get totals (O/U) market odds for a Polymarket event (full game only).
+        """
+        if not self.event_slug:
+            return []
+        event = self.analyzer.fetch_event_by_slug(self.event_slug)
+        if not event:
+            return []
+
+        slugs = self.analyzer.totals_market_slugs_from_event(event)
+        if not slugs:
+            # Retry once (Gamma can be eventually consistent for sub-markets).
+            try:
+                event = self.analyzer.fetch_event_by_slug(self.event_slug) or event
+            except Exception:
+                pass
+            slugs = self.analyzer.totals_market_slugs_from_event(event)
+
+        print(
+            f"Found {len(slugs)} totals market slugs for "
+            f"{self.away_team} vs {self.home_team}: {slugs}"
+        )
+        if not slugs:
+            return []
+
+        results: List[MarketOdds] = []
+        for slug in slugs:
+            results.extend(self.analyzer.analyze_event(event, market_slug=slug))
+        return results
 

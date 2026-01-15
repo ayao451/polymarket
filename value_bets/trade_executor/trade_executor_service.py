@@ -94,17 +94,17 @@ class TradeExecutorService:
 
     @staticmethod
     def _trades_csv_path() -> str:
-        # Write next to `moneyline/main.py`
-        moneyline_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        return os.path.join(moneyline_root, "trades.csv")
+        # Write next to `value_bets/value_bets.py`
+        value_bets_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        return os.path.join(value_bets_root, "trades.csv")
 
     @staticmethod
     def _successful_trades_path() -> str:
         """
         Legacy location (deprecated).
         """
-        moneyline_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        return os.path.join(moneyline_root, "successful_trades.txt")
+        value_bets_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        return os.path.join(value_bets_root, "successful_trades.txt")
 
     @classmethod
     def _append_successful_trade(cls, result: TradeExecutionResult) -> None:

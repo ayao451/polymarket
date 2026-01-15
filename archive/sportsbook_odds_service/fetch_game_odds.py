@@ -21,6 +21,8 @@ NFL_SPORT_KEY = "americanfootball_nfl"
 NCAAF_SPORT_KEY = "americanfootball_ncaaf"
 NHL_SPORT_KEY = "icehockey_nhl"
 MONEYLINE_MARKET_KEY = "h2h"
+SPREAD_MARKET_KEY = "spreads"
+TOTALS_MARKET_KEY = "totals"
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,41 @@ class BookMoneyline:
     bookmaker_title: str
     last_update: str
     outcomes: Tuple[MoneylineOutcome, MoneylineOutcome]
+
+
+@dataclass(frozen=True)
+class SpreadOutcome:
+    team: str
+    # point is the handicap line for this outcome, e.g. +6.5 / -6.5
+    point: float
+    # cost_to_win_1 = 1/decimal_odds (stake required to receive $1 total back)
+    cost_to_win_1: float
+
+
+@dataclass(frozen=True)
+class BookSpread:
+    bookmaker_key: str
+    bookmaker_title: str
+    last_update: str
+    outcomes: Tuple[SpreadOutcome, SpreadOutcome]
+
+
+@dataclass(frozen=True)
+class TotalsOutcome:
+    # "Over" or "Under"
+    side: str
+    # total points line, e.g. 229.5
+    point: float
+    # cost_to_win_1 = 1/decimal_odds (stake required to receive $1 total back)
+    cost_to_win_1: float
+
+
+@dataclass(frozen=True)
+class BookTotals:
+    bookmaker_key: str
+    bookmaker_title: str
+    last_update: str
+    outcomes: Tuple[TotalsOutcome, TotalsOutcome]
 
 
 def _parse_iso_z(dt: str) -> datetime:
@@ -149,6 +186,118 @@ def extract_moneyline_odds_all_books(event: Dict[str, Any]) -> List[BookMoneylin
                 bookmaker_title=str(bookmaker.get("title", "")),
                 last_update=str(bookmaker.get("last_update", "")),
                 outcomes=(parsed_outcomes[0], parsed_outcomes[1]),
+            )
+        )
+
+    return books
+
+
+def extract_spread_odds_all_books(event: Dict[str, Any]) -> List[BookSpread]:
+    """
+    Extract spread odds ("spreads") from all bookmakers for an event.
+
+    The Odds API v4 spread outcomes typically include:
+      - name: team name
+      - point: handicap (e.g. +6.5, -6.5)
+      - price: decimal odds
+    """
+    books: List[BookSpread] = []
+    for bookmaker in event.get("bookmakers", []) or []:
+        markets = bookmaker.get("markets", []) or []
+        spreads = next((m for m in markets if m.get("key") == SPREAD_MARKET_KEY), None)
+        if not spreads:
+            continue
+
+        outcomes = spreads.get("outcomes", []) or []
+        if len(outcomes) != 2:
+            # Spread markets should be 2-way; skip anything else.
+            continue
+
+        parsed_outcomes: List[SpreadOutcome] = []
+        for o in outcomes:
+            name = o.get("name")
+            price = o.get("price")
+            point = o.get("point")
+            if name is None or price is None or point is None:
+                continue
+            try:
+                dec = float(price)
+                pt = float(point)
+            except (TypeError, ValueError):
+                continue
+            if dec <= 0:
+                continue
+            parsed_outcomes.append(
+                SpreadOutcome(team=str(name), point=float(pt), cost_to_win_1=(1.0 / dec))
+            )
+
+        if len(parsed_outcomes) != 2:
+            continue
+
+        books.append(
+            BookSpread(
+                bookmaker_key=str(bookmaker.get("key", "")),
+                bookmaker_title=str(bookmaker.get("title", "")),
+                last_update=str(bookmaker.get("last_update", "")),
+                outcomes=(parsed_outcomes[0], parsed_outcomes[1]),
+            )
+        )
+
+    return books
+
+
+def extract_totals_odds_all_books(event: Dict[str, Any]) -> List[BookTotals]:
+    """
+    Extract totals odds ("totals") from all bookmakers for an event.
+
+    The Odds API v4 totals outcomes typically include:
+      - name: "Over" / "Under"
+      - point: total line (e.g. 229.5)
+      - price: decimal odds
+    """
+    books: List[BookTotals] = []
+    for bookmaker in event.get("bookmakers", []) or []:
+        markets = bookmaker.get("markets", []) or []
+        totals = next((m for m in markets if m.get("key") == TOTALS_MARKET_KEY), None)
+        if not totals:
+            continue
+
+        outcomes = totals.get("outcomes", []) or []
+        if len(outcomes) != 2:
+            continue
+
+        parsed: List[TotalsOutcome] = []
+        for o in outcomes:
+            name = o.get("name")
+            price = o.get("price")
+            point = o.get("point")
+            if name is None or price is None or point is None:
+                continue
+            try:
+                dec = float(price)
+                pt = float(point)
+            except (TypeError, ValueError):
+                continue
+            if dec <= 0:
+                continue
+            side = str(name).strip()
+            if not side:
+                continue
+            parsed.append(TotalsOutcome(side=side, point=float(pt), cost_to_win_1=(1.0 / dec)))
+
+        if len(parsed) != 2:
+            continue
+
+        # Totals should share the same point line for both outcomes; if not, skip.
+        if float(parsed[0].point) != float(parsed[1].point):
+            continue
+
+        books.append(
+            BookTotals(
+                bookmaker_key=str(bookmaker.get("key", "")),
+                bookmaker_title=str(bookmaker.get("title", "")),
+                last_update=str(bookmaker.get("last_update", "")),
+                outcomes=(parsed[0], parsed[1]),
             )
         )
 

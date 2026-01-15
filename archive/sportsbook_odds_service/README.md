@@ -1,13 +1,13 @@
 # Sportsbook Odds Service
 
-This folder provides a service that connects to The Odds API to fetch odds from multiple sportsbooks for NBA games.
+This folder provides a service that connects to The Odds API to fetch odds (currently Pinnacle-only) for games.
 
 Currently supports:
 - Moneyline odds
-
-Future support planned for:
 - Spreads
 - Totals (Over/Under)
+
+Future support planned for:
 - Player props
 - And more
 
@@ -70,4 +70,6 @@ python3 fetch_game_odds.py --team-a "Chicago Bulls" --team-b "Detroit Pistons" -
 ```
 
 ## Configure sportsbook weights
-Edit `SPORTSBOOK_WEIGHTS` in `weighted_average.py`. Pinnacle is set to `0.50` by default; any other present books share the remaining weight equally.
+Edit `SPORTSBOOK_WEIGHTS` in `weighted_average.py`.
+
+Current default is **Pinnacle-only** (`pinnacle=1.0`). The code also filters to Pinnacle by bookmaker key, so no other books are used unless you change that behavior.

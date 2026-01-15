@@ -2,7 +2,7 @@
 """
 CLI helper functions for validation and display.
 
-Keeps `main.py` focused on orchestration.
+Keeps `value_bets.py` focused on orchestration.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import List, Optional
 
-from sportsbook_odds_service.sportsbook_weighted_odds_interface import MoneylineOdds
+from pinnacle_scraper.pinnacle_sportsbook_odds_interface import MoneylineOdds, SpreadOdds, TotalsOdds
 from polymarket_odds_service.polymarket_market_analyzer import MarketOdds
 
 
@@ -59,18 +59,7 @@ def _validate_environment() -> Optional[str]:
     """
     Returns an error message string if invalid; otherwise None.
     """
-    # API_KEY is needed for The Odds API calls
-    import os
-
-    api_key = os.getenv("API_KEY")
-    if not api_key:
-        return (
-            "API_KEY environment variable is not set.\n"
-            "Please set it using: export API_KEY='your_api_key_here'\n"
-            "Or create a .env file in the nba/sportsbook_odds_service directory with: API_KEY=your_api_key_here"
-        )
-    if len(api_key.strip()) == 0:
-        return "API_KEY environment variable is empty."
+    # No sportsbook API keys required anymore (Pinnacle Arcadia is fetched directly).
     return None
 
 
@@ -101,10 +90,10 @@ def _parse_and_validate_cli_args(argv: List[str]) -> CLIArgs:
         raise ValueError(
             "Insufficient arguments provided.\n\n"
             "Usage:\n"
-            "  python3 main.py <team_a> <team_b> [date]\n\n"
+            "  python3 value_bets.py <team_a> <team_b> [date]\n\n"
             "Example:\n"
-            "  python3 main.py 'Chicago Bulls' 'Detroit Pistons' 2026-01-07\n"
-            "  python3 main.py 'Chicago Bulls' 'Detroit Pistons'  # Uses today's date"
+            "  python3 value_bets.py 'Chicago Bulls' 'Detroit Pistons' 2026-01-07\n"
+            "  python3 value_bets.py 'Chicago Bulls' 'Detroit Pistons'  # Uses today's date"
         )
 
     team_a = argv[1].strip()
@@ -141,6 +130,40 @@ def print_sportsbook_odds(sportsbook_result: Optional[MoneylineOdds]):
         print(sportsbook_result.to_string())
     else:
         print("Failed to fetch sportsbook odds")
+    print("=" * 80)
+
+
+def print_sportsbook_spread_odds(spreads: Optional[List[SpreadOdds]]):
+    """
+    Print sportsbook spread odds in the same banner style as moneyline.
+    """
+    print("\n" + "=" * 80)
+    print("SPORTSBOOK SPREAD ODDS")
+    print("=" * 80)
+
+
+def print_sportsbook_totals_odds(totals: Optional[List[TotalsOdds]]):
+    """
+    Print sportsbook totals odds in the same banner style as moneyline.
+    """
+    print("\n" + "=" * 80)
+    print("SPORTSBOOK TOTALS ODDS")
+    print("=" * 80)
+
+    if not totals:
+        print("No sportsbook totals odds available")
+        print("=" * 80)
+        return
+
+    def _sort_key(t: TotalsOdds):
+        try:
+            return float(t.total_point)
+        except Exception:
+            return 0.0
+
+    for t in sorted(totals, key=_sort_key):
+        print(t.to_string())
+
     print("=" * 80)
 
 
