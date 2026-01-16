@@ -140,6 +140,22 @@ def print_sportsbook_spread_odds(spreads: Optional[List[SpreadOdds]]):
     print("\n" + "=" * 80)
     print("SPORTSBOOK SPREAD ODDS")
     print("=" * 80)
+    
+    if not spreads:
+        print("No sportsbook spread odds available")
+        print("=" * 80)
+        return
+    
+    def _sort_key(s: SpreadOdds):
+        try:
+            return abs(float(s.away_point))
+        except Exception:
+            return 0.0
+    
+    for s in sorted(spreads, key=_sort_key):
+        print(s.to_string())
+    
+    print("=" * 80)
 
 
 def print_sportsbook_totals_odds(totals: Optional[List[TotalsOdds]]):
@@ -190,6 +206,99 @@ def print_polymarket_moneyline(polymarket_results: Optional[List[MarketOdds]]):
         print("POLYMARKET MONEYLINE")
         print("=" * 80)
         print("No Polymarket data available (event not found or error occurred)")
+        print("=" * 80)
+
+
+def print_polymarket_spreads(polymarket_spreads: Optional[List[MarketOdds]]):
+    """Print Polymarket spread odds."""
+    if polymarket_spreads:
+        print("\n" + "=" * 80)
+        print(f"POLYMARKET SPREADS ({len(polymarket_spreads)} markets)")
+        print("=" * 80)
+        
+        # Group by base question
+        def _base_question(label: str) -> str:
+            s = label or ""
+            i = s.rfind("(")
+            return s[:i].strip() if i != -1 else s.strip()
+
+        def _outcome_label(label: str) -> str:
+            s = label or ""
+            i = s.rfind("(")
+            j = s.rfind(")")
+            if i == -1 or j == -1 or j <= i:
+                return ""
+            return (s[i + 1 : j] or "").strip()
+
+        groups: dict[str, list] = {}
+        for m in polymarket_spreads:
+            groups.setdefault(_base_question(m.market), []).append(m)
+
+        for q in sorted(groups.keys()):
+            print(f"\n- {q}")
+            for m in sorted(groups[q], key=lambda mm: _outcome_label(mm.market)):
+                bid_s = f"{m.best_bid:.4f}" if m.best_bid is not None else "N/A"
+                ask_s = f"{m.best_ask:.4f}" if m.best_ask is not None else "N/A"
+                spr_s = f"{m.spread:.4f}" if m.spread is not None else "N/A"
+                outcome = _outcome_label(m.market)
+                print(f"  * {outcome}")
+                print(
+                    f"    Bid: {bid_s} (vol: {m.bid_volume:.2f}) | "
+                    f"Ask: {ask_s} (vol: {m.ask_volume:.2f}) | "
+                    f"Spread: {spr_s}"
+                )
+        print("=" * 80)
+    else:
+        print("\n" + "=" * 80)
+        print("POLYMARKET SPREADS")
+        print("=" * 80)
+        print("No Polymarket spread data available")
+        print("=" * 80)
+
+
+def print_polymarket_totals(polymarket_totals: Optional[List[MarketOdds]]):
+    """Print Polymarket totals odds."""
+    if polymarket_totals:
+        print("\n" + "=" * 80)
+        print(f"POLYMARKET TOTALS ({len(polymarket_totals)} markets)")
+        print("=" * 80)
+        
+        # Group by base question
+        def _base_q(label: str) -> str:
+            s = label or ""
+            i = s.rfind("(")
+            return s[:i].strip() if i != -1 else s.strip()
+
+        def _outcome(label: str) -> str:
+            s = label or ""
+            i = s.rfind("(")
+            j = s.rfind(")")
+            if i == -1 or j == -1 or j <= i:
+                return ""
+            return (s[i + 1 : j] or "").strip()
+
+        groups: dict[str, list] = {}
+        for m in polymarket_totals:
+            groups.setdefault(_base_q(m.market), []).append(m)
+
+        for q in sorted(groups.keys()):
+            print(f"\n- {q}")
+            for m in sorted(groups[q], key=lambda mm: _outcome(mm.market)):
+                bid_s = f"{m.best_bid:.4f}" if m.best_bid is not None else "N/A"
+                ask_s = f"{m.best_ask:.4f}" if m.best_ask is not None else "N/A"
+                spr_s = f"{m.spread:.4f}" if m.spread is not None else "N/A"
+                print(f"  * {_outcome(m.market)}")
+                print(
+                    f"    Bid: {bid_s} (vol: {m.bid_volume:.2f}) | "
+                    f"Ask: {ask_s} (vol: {m.ask_volume:.2f}) | "
+                    f"Spread: {spr_s}"
+                )
+        print("=" * 80)
+    else:
+        print("\n" + "=" * 80)
+        print("POLYMARKET TOTALS")
+        print("=" * 80)
+        print("No Polymarket totals data available")
         print("=" * 80)
 
 

@@ -70,7 +70,8 @@ class PolymarketGameFinder:
 
     @staticmethod
     def _normalize(s: str) -> str:
-        return " ".join(str(s).strip().lower().split())
+        # Assumes input is already stripped
+        return " ".join(str(s).lower().split())
 
     @classmethod
     def _team_tokens(cls, team: str) -> List[str]:
@@ -121,6 +122,9 @@ class PolymarketGameFinder:
         """
         Find the Gamma event slug for a matchup on a given local date.
         """
+        # Strip inputs once when they first enter
+        away_team = away_team.strip() if away_team else ""
+        home_team = home_team.strip() if home_team else ""
         away_tokens = self._team_tokens(away_team)
         home_tokens = self._team_tokens(home_team)
         if not away_tokens or not home_tokens:
@@ -142,7 +146,11 @@ class PolymarketGameFinder:
                     break
 
                 for event in events:
-                    title = self._normalize(event.get("title", ""))
+                    title_raw = event.get("title") or ""
+                    if not title_raw:
+                        continue
+                    # Strip once when extracting from event
+                    title = self._normalize(str(title_raw).strip())
                     if not title:
                         continue
 
@@ -155,7 +163,11 @@ class PolymarketGameFinder:
                     if start is not None and start.astimezone().date() != play_date:
                         continue
 
-                    slug = str(event.get("slug") or "").strip()
+                    slug_raw = event.get("slug") or ""
+                    if not slug_raw:
+                        continue
+                    # Strip once when extracting from event
+                    slug = str(slug_raw).strip()
                     if slug:
                         return slug
 

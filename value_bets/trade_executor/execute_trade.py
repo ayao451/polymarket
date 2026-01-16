@@ -5,11 +5,22 @@ import requests
 import json
 import os
 
+# Load .env file if it exists
+try:
+    from dotenv import load_dotenv
+    # Load .env from project root (two levels up from this file)
+    env_path = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
+    load_dotenv(env_path)
+    # Also try loading from current directory
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed, skip
+
 try:
     # Preferred local config (not checked into git)
     from config_local import host, key, chain_id, POLYMARKET_PROXY_ADDRESS  # type: ignore
 except Exception:
-    # Fallback to environment variables
+    # Fallback to environment variables (now loaded from .env if present)
     host = os.getenv("POLYMARKET_HOST")
     key = os.getenv("POLYMARKET_KEY")
     chain_id = os.getenv("POLYMARKET_CHAIN_ID")

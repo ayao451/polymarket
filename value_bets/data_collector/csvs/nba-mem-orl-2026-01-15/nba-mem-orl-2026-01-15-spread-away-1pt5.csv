@@ -1,0 +1,2 @@
+value_bet,edge,side,event_name,timestamp,team,point,token_id,true_prob,polymarket_best_ask,expected_payout_per_1
+spread,0.303664,BUY,Memphis Grizzlies @ Orlando Magic,2026-01-15T20:36:12.078409+00:00,Grizzlies,-1.5,112944786611904523225694871747264945329888475934232636149247785416125910842503,0.508429,0.390000,1.303664

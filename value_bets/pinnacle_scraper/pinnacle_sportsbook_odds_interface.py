@@ -137,7 +137,7 @@ class PinnacleSportsbookOddsInterface:
             )
             return None, [], []
         # Only full-game (period=0) markets are used for Polymarket matching.
-        rows = [r for r in (res.markets or []) if int(getattr(r, "period", 0)) == 0 and not bool(getattr(r, "is_alternate", False))]
+        rows = [r for r in (res.markets or []) if int(r.period or 0) == 0 and not bool(r.is_alternate or False)]
 
         away_team = match.away_team
         home_team = match.home_team

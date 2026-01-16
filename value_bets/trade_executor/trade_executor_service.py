@@ -59,10 +59,16 @@ class TradeExecutorService:
         Returns None if unavailable.
         """
         if self._trader is None:
+            if self._init_error:
+                print(f"Trade executor not initialized: {self._init_error}")
             return None
         try:
-            return float(self._trader.get_usdc_balance())
-        except Exception:
+            balance = self._trader.get_usdc_balance()
+            return float(balance)
+        except Exception as e:
+            print(f"Error fetching USDC balance: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def _fail(
@@ -98,14 +104,6 @@ class TradeExecutorService:
         value_bets_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         return os.path.join(value_bets_root, "trades.csv")
 
-    @staticmethod
-    def _successful_trades_path() -> str:
-        """
-        Legacy location (deprecated).
-        """
-        value_bets_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        return os.path.join(value_bets_root, "successful_trades.txt")
-
     @classmethod
     def _append_successful_trade(cls, result: TradeExecutionResult) -> None:
         """
@@ -114,7 +112,11 @@ class TradeExecutorService:
         """
         try:
             ts = datetime.now(timezone.utc).isoformat()
-            order_type = getattr(result.order_type, "name", None) or str(result.order_type)
+            # OrderType is an enum, try to get its name
+            try:
+                order_type = result.order_type.name
+            except AttributeError:
+                order_type = str(result.order_type)
 
             status = None
             order_id = None
@@ -134,7 +136,7 @@ class TradeExecutorService:
             profit = payout - amount
 
             team = (result.team or "").strip() or "UNKNOWN_TEAM"
-            game = (result.game or "").strip()
+            game = (result.game or "").strip() if result.game else ""
 
             # Ensure tx_hashes is a string for CSV.
             if isinstance(tx_hashes, (list, tuple, dict)):

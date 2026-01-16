@@ -21,7 +21,16 @@ from .find_game import PolymarketGameFinder
 class PolymarketOddsInterface:
     """Interface to fetch Polymarket market odds."""
     
-    def __init__(self, away_team: str, home_team: str, play_date: Optional[date] = None):
+    def __init__(
+        self, 
+        away_team: str, 
+        home_team: str, 
+        play_date: Optional[date] = None, 
+        verbose: bool = False,
+        event_slug: Optional[str] = None,
+        cached_event: Optional[Dict] = None,
+        cached_market_slugs: Optional[Dict[str, List[str]]] = None,
+    ):
         """
         Initialize the interface for a specific matchup.
 
@@ -29,21 +38,32 @@ class PolymarketOddsInterface:
             away_team: Away team name
             home_team: Home team name
             play_date: Optional local date (defaults to today)
+            verbose: If True, print detailed logs about fetching events and markets
+            event_slug: Optional pre-resolved event slug (avoids lookup)
+            cached_event: Optional pre-fetched event data (avoids API call)
+            cached_market_slugs: Optional dict with 'moneyline', 'spreads', 'totals' keys containing market slug lists
         """
-        self.analyzer = PolymarketMarketAnalyzer()
+        self.analyzer = PolymarketMarketAnalyzer(verbose=verbose)
         self.game_finder = PolymarketGameFinder()
-        self.away_team = away_team
-        self.home_team = home_team
+        # Strip inputs once when they first enter
+        self.away_team = away_team.strip() if away_team else ""
+        self.home_team = home_team.strip() if home_team else ""
         self.play_date = play_date
+        self._cached_event = cached_event
+        self._cached_market_slugs = cached_market_slugs
 
-        # Resolved event slug for this matchup (None if not found)
-        try:
-            self.event_slug: Optional[str] = self._find_event_slug(
-                away_team=away_team, home_team=home_team, play_date=play_date
-            )
-        except Exception as e:
-            print(f"Warning: Could not find Polymarket event: {e}")
-            self.event_slug = None
+        # Use provided event_slug or resolve it
+        if event_slug:
+            self.event_slug = event_slug
+        else:
+            try:
+                self.event_slug = self._find_event_slug(
+                    away_team=away_team, home_team=home_team, play_date=play_date
+                )
+            except Exception as e:
+                if verbose:
+                    print(f"Warning: Could not find Polymarket event: {e}")
+                self.event_slug = None
     
     def _find_event_slug(
         self, *, away_team: str, home_team: str, play_date: Optional[date] = None
@@ -56,7 +76,8 @@ class PolymarketOddsInterface:
 
     @staticmethod
     def _normalize(s: str) -> str:
-        return " ".join(str(s).strip().lower().split())
+        # Assumes input is already stripped
+        return " ".join(str(s).lower().split())
 
     @classmethod
     def _team_matches_outcome(cls, team_name: str, outcome_name: str) -> bool:
@@ -89,7 +110,6 @@ class PolymarketOddsInterface:
         - "Team (+3.0)"
         - "Over 145.5" / "Under 145.5"
         """
-        s = str(text or "").strip()
         if not s:
             return False
 
@@ -120,7 +140,10 @@ class PolymarketOddsInterface:
         - "Bulls +6.5" -> ("Bulls", +6.5)
         - "Bulls -6.5" -> ("Bulls", -6.5)
         """
-        s = str(text or "").strip()
+        # Strip input once when it first enters
+        if not text:
+            return None
+        s = str(text).strip()
         if not s:
             return None
         low = s.lower()
@@ -133,8 +156,11 @@ class PolymarketOddsInterface:
         if not m:
             return None
 
-        team = (m.group("team") or "").strip()
-        pt_s = (m.group("pt") or "").strip()
+        team = m.group("team") or ""
+        pt_s = m.group("pt") or ""
+        # Strip once after extracting from regex
+        team = team.strip()
+        pt_s = pt_s.strip()
         if not team or not pt_s:
             return None
         try:
@@ -150,9 +176,11 @@ class PolymarketOddsInterface:
         slugs: List[str] = []
         markets = event.get("markets", []) or []
         for m in markets:
-            slug = str(m.get("slug") or "").strip()
-            if not slug:
+            slug_raw = m.get("slug") or ""
+            if not slug_raw:
                 continue
+            # Strip once when extracting from event
+            slug = str(slug_raw).strip()
 
             outcomes_raw = m.get("outcomes", "[]")
             try:
@@ -191,9 +219,11 @@ class PolymarketOddsInterface:
         """
         markets = event.get("markets", []) or []
         for m in markets:
-            slug = str(m.get("slug") or "").strip()
-            if not slug:
+            slug_raw = m.get("slug") or ""
+            if not slug_raw:
                 continue
+            # Strip once when extracting from event
+            slug = str(slug_raw).strip()
 
             outcomes_raw = m.get("outcomes", "[]")
             try:
@@ -237,7 +267,9 @@ class PolymarketOddsInterface:
         """
         if not self.event_slug:
             return []
-        event = self.analyzer.fetch_event_by_slug(self.event_slug)
+        
+        # Use cached event if available, otherwise fetch
+        event = self._cached_event if self._cached_event else self.analyzer.fetch_event_by_slug(self.event_slug)
         if not event:
             return []
 
@@ -251,10 +283,11 @@ class PolymarketOddsInterface:
         # attempt to identify the moneyline market by outcome matching.
         market_slug = self._select_moneyline_market_slug(event)
         if not market_slug:
-            print(
-                f"Warning: Could not identify a 2-outcome moneyline market for "
-                f"{self.away_team} @ {self.home_team} (event_slug={self.event_slug}). Skipping."
-            )
+            if self.analyzer.verbose:
+                print(
+                    f"Warning: Could not identify a 2-outcome moneyline market for "
+                    f"{self.away_team} @ {self.home_team} (event_slug={self.event_slug}). Skipping."
+                )
             return []
 
         return self.analyzer.analyze_event(event, market_slug=market_slug)
@@ -265,26 +298,30 @@ class PolymarketOddsInterface:
         """
         if not self.event_slug:
             return []
-        event = self.analyzer.fetch_event_by_slug(self.event_slug)
+        
+        # Use cached event if available, otherwise fetch
+        event = self._cached_event if self._cached_event else self.analyzer.fetch_event_by_slug(self.event_slug)
         if not event:
             return []
 
-        # Use the event payload from:
-        #   GET https://gamma-api.polymarket.com/events/slug/{event_slug}
-        # and pull spread market slugs directly from its `markets` array.
-        slugs = self.analyzer.spread_market_slugs_from_event(event)
-        if not slugs:
-            # Retry once (Gamma can be eventually consistent for sub-markets).
-            try:
-                event = self.analyzer.fetch_event_by_slug(self.event_slug) or event
-            except Exception:
-                pass
+        # Use cached market slugs if available, otherwise extract from event
+        if self._cached_market_slugs and 'spreads' in self._cached_market_slugs:
+            slugs = self._cached_market_slugs['spreads']
+        else:
             slugs = self.analyzer.spread_market_slugs_from_event(event)
+            if not slugs:
+                # Retry once (Gamma can be eventually consistent for sub-markets).
+                try:
+                    event = self.analyzer.fetch_event_by_slug(self.event_slug) or event
+                except Exception:
+                    pass
+                slugs = self.analyzer.spread_market_slugs_from_event(event)
 
-        print(
-            f"Found {len(slugs)} spread market slugs for "
-            f"{self.away_team} vs {self.home_team}: {slugs}"
-        )
+        if self.analyzer.verbose:
+            print(
+                f"Found {len(slugs)} spread market slugs for "
+                f"{self.away_team} vs {self.home_team}: {slugs}"
+            )
         if not slugs:
             return []
 
@@ -299,23 +336,30 @@ class PolymarketOddsInterface:
         """
         if not self.event_slug:
             return []
-        event = self.analyzer.fetch_event_by_slug(self.event_slug)
+        
+        # Use cached event if available, otherwise fetch
+        event = self._cached_event if self._cached_event else self.analyzer.fetch_event_by_slug(self.event_slug)
         if not event:
             return []
 
-        slugs = self.analyzer.totals_market_slugs_from_event(event)
-        if not slugs:
-            # Retry once (Gamma can be eventually consistent for sub-markets).
-            try:
-                event = self.analyzer.fetch_event_by_slug(self.event_slug) or event
-            except Exception:
-                pass
+        # Use cached market slugs if available, otherwise extract from event
+        if self._cached_market_slugs and 'totals' in self._cached_market_slugs:
+            slugs = self._cached_market_slugs['totals']
+        else:
             slugs = self.analyzer.totals_market_slugs_from_event(event)
+            if not slugs:
+                # Retry once (Gamma can be eventually consistent for sub-markets).
+                try:
+                    event = self.analyzer.fetch_event_by_slug(self.event_slug) or event
+                except Exception:
+                    pass
+                slugs = self.analyzer.totals_market_slugs_from_event(event)
 
-        print(
-            f"Found {len(slugs)} totals market slugs for "
-            f"{self.away_team} vs {self.home_team}: {slugs}"
-        )
+        if self.analyzer.verbose:
+            print(
+                f"Found {len(slugs)} totals market slugs for "
+                f"{self.away_team} vs {self.home_team}: {slugs}"
+            )
         if not slugs:
             return []
 

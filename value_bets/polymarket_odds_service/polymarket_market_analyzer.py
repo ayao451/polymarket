@@ -33,11 +33,15 @@ class PolymarketMarketAnalyzer:
     
     GAMMA_API_BASE = "https://gamma-api.polymarket.com"
     CLOB_API_BASE = "https://clob.polymarket.com"
-    def __init__(self):
+    def __init__(self, verbose: bool = False):
         """
         Initialize the analyzer.
+        
+        Args:
+            verbose: If True, print detailed logs about fetching events.
         """
         self.session = requests.Session()
+        self.verbose = verbose
     
     def fetch_event_by_slug(self, slug: str) -> Optional[Dict]:
         """
@@ -52,14 +56,17 @@ class PolymarketMarketAnalyzer:
         url = f"{self.GAMMA_API_BASE}/events/slug/{slug}"
         
         try:
-            print(f"Fetching event: {slug}...")
+            if self.verbose:
+                print(f"Fetching event: {slug}...")
             response = self.session.get(url)
             response.raise_for_status()
             event_data = response.json()
-            print(f"Successfully fetched event: {event_data.get('title', 'Unknown')}\n")
+            if self.verbose:
+                print(f"Successfully fetched event: {event_data.get('title', 'Unknown')}\n")
             return event_data
         except requests.exceptions.RequestException as e:
-            print(f"Error fetching event: {e}")
+            if self.verbose:
+                print(f"Error fetching event: {e}")
             return None
 
     @staticmethod
@@ -88,7 +95,11 @@ class PolymarketMarketAnalyzer:
                     continue
                 q = str(m.get("question") or "")
                 smt = str(m.get("sportsMarketType") or "")
-                slug = str(m.get("slug") or "").strip()
+                slug_raw = m.get("slug") or ""
+                if not slug_raw:
+                    continue
+                # Strip once when extracting from event
+                slug = str(slug_raw).strip()
 
                 # Exclude 1H / first half spread markets; we only want full game spreads.
                 q_low = q.lower()
@@ -154,7 +165,11 @@ class PolymarketMarketAnalyzer:
                     continue
                 q = str(m.get("question") or "")
                 smt = str(m.get("sportsMarketType") or "")
-                slug = str(m.get("slug") or "").strip()
+                slug_raw = m.get("slug") or ""
+                if not slug_raw:
+                    continue
+                # Strip once when extracting from event
+                slug = str(slug_raw).strip()
 
                 q_low = q.lower()
                 smt_low = smt.lower()
@@ -272,7 +287,8 @@ class PolymarketMarketAnalyzer:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"  Error fetching orderbook for token {token_id}: {e}")
+            if self.verbose:
+                print(f"  Error fetching orderbook for token {token_id}: {e}")
             return None
     
     def calculate_market_stats(self, orderbook: Dict) -> Dict:
@@ -353,7 +369,8 @@ class PolymarketMarketAnalyzer:
         if market_slug is not None:
             token_data = [t for t in token_data if t.get("market_slug") == market_slug]
             if not token_data:
-                print(f"Failed to find market '{market_slug}' in event '{event_slug}'")
+                if self.verbose:
+                    print(f"Failed to find market '{market_slug}' in event '{event_slug}'")
                 return []
 
         # Analyze each market

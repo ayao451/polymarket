@@ -191,6 +191,7 @@ def _format_dt_utc(dt_utc: datetime) -> str:
 def _teams_from_matchup_item(m: Dict[str, Any]) -> tuple[str, str]:
     """
     Extract (away, home) names from a matchup listing payload.
+    Prefers full names over abbreviations.
     """
     away = ""
     home = ""
@@ -199,7 +200,14 @@ def _teams_from_matchup_item(m: Dict[str, Any]) -> tuple[str, str]:
         for p in parts:
             if not isinstance(p, dict):
                 continue
-            name = _norm(str(p.get("name") or ""))
+            # Prefer full name fields, fall back to name
+            name = _norm(str(
+                p.get("fullName") or 
+                p.get("displayName") or 
+                p.get("longName") or 
+                p.get("name") or 
+                ""
+            ))
             align = _norm_key(str(p.get("alignment") or ""))
             if not name or not align:
                 continue
@@ -615,7 +623,14 @@ def _arcadia_extract_teams_from_related(related_payload: Any) -> Tuple[Optional[
         for p in parts:
             if not isinstance(p, dict):
                 continue
-            name = _norm(str(p.get("name") or ""))
+            # Prefer full name fields, fall back to name
+            name = _norm(str(
+                p.get("fullName") or 
+                p.get("displayName") or 
+                p.get("longName") or 
+                p.get("name") or 
+                ""
+            ))
             align = _norm_key(str(p.get("alignment") or ""))
             if not name or not align:
                 continue
@@ -780,16 +795,16 @@ def _arcadia_markets_to_rows(markets_payload: Any, *, away: str, home: str) -> L
             # For moneylines, deduplicate without odds (only one per team/period/is_alternate)
             k = (
                 r.market_type,
-                int(getattr(r, "period", 0)),
-                bool(getattr(r, "is_alternate", False)),
+                int(r.period or 0),
+                bool(r.is_alternate or False),
                 _norm_key(r.selection),
             )
         else:
             # For spreads/totals, include line (and odds) in dedup key
             k = (
                 r.market_type,
-                int(getattr(r, "period", 0)),
-                bool(getattr(r, "is_alternate", False)),
+                int(r.period or 0),
+                bool(r.is_alternate or False),
                 _norm_key(r.selection),
                 r.line,
                 r.odds,
@@ -852,7 +867,15 @@ def _extract_teams_from_payload(payload: Any) -> Tuple[Optional[str], Optional[s
             for p in parts:
                 if not isinstance(p, dict):
                     continue
-                name = _norm(str(p.get("name") or p.get("participantName") or ""))
+                # Prefer full name fields, fall back to name/participantName
+                name = _norm(str(
+                    p.get("fullName") or 
+                    p.get("displayName") or 
+                    p.get("longName") or 
+                    p.get("name") or 
+                    p.get("participantName") or 
+                    ""
+                ))
                 if not name:
                     continue
                 align = _norm_key(str(p.get("alignment") or p.get("side") or p.get("homeAway") or ""))
@@ -869,11 +892,27 @@ def _extract_teams_from_payload(payload: Any) -> Tuple[Optional[str], Optional[s
         ht = d.get("homeTeam") or d.get("home_team") or d.get("home")
         at = d.get("awayTeam") or d.get("away_team") or d.get("away")
         if isinstance(ht, dict):
-            ht_name = _norm(str(ht.get("name") or ht.get("teamName") or ""))
+            # Prefer full name fields, fall back to name/teamName
+            ht_name = _norm(str(
+                ht.get("fullName") or 
+                ht.get("displayName") or 
+                ht.get("longName") or 
+                ht.get("name") or 
+                ht.get("teamName") or 
+                ""
+            ))
         else:
             ht_name = _norm(str(ht or ""))
         if isinstance(at, dict):
-            at_name = _norm(str(at.get("name") or at.get("teamName") or ""))
+            # Prefer full name fields, fall back to name/teamName
+            at_name = _norm(str(
+                at.get("fullName") or 
+                at.get("displayName") or 
+                at.get("longName") or 
+                at.get("name") or 
+                at.get("teamName") or 
+                ""
+            ))
         else:
             at_name = _norm(str(at or ""))
         if ht_name and at_name:
@@ -1194,7 +1233,7 @@ def _scrape_via_api_interception(page: Page, *, url: str, timeout_ms: int) -> Tu
                     {
                         "url": r_url,
                         "method": req.method,
-                        "resource_type": str(getattr(req, "resource_type", "") or ""),
+                        "resource_type": str(req.resource_type if hasattr(req, "resource_type") else ""),
                         "headers_subset": keep,
                     }
                 )
@@ -1245,7 +1284,7 @@ def _scrape_via_api_interception(page: Page, *, url: str, timeout_ms: int) -> Tu
             headers = resp.headers or {}
             rtype = ""
             try:
-                rtype = str(getattr(req, "resource_type", "") or "")
+                rtype = str(req.resource_type if hasattr(req, "resource_type") else "")
             except Exception:
                 rtype = ""
 

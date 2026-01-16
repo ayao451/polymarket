@@ -66,11 +66,14 @@ class ValueBetService:
     @staticmethod
     def _team_matches_outcome(team_name: str, outcome_team_name: str) -> bool:
         """
-        Polymarket outcomes are often just the nickname (e.g. "Heat") while the sportsbook
-        side may be the full name (e.g. "Miami Heat"). Consider them a match if:
-        - exact normalized match, OR
-        - normalized outcome equals the last word of full team name, OR
-        - outcome is contained in full name (rare but safe)
+        Match team names (similar to _teams_match but for value bet service).
+        
+        Handles cases like:
+        - Polymarket: "Heat" vs Sportsbook: "Miami Heat" (nickname matching)
+        - Pinnacle: "Gonzaga" vs Polymarket: "Gonzaga Bulldogs" (NCAA school name matching)
+        - Full name variations
+        
+        Returns True if they match, False otherwise.
         """
         full_key = ValueBetService._normalize_team_name(team_name)
         outcome_key = ValueBetService._normalize_team_name(outcome_team_name)
@@ -80,12 +83,34 @@ class ValueBetService:
         if full_key == outcome_key:
             return True
 
-        full_last = full_key.split()[-1]
-        if outcome_key == full_last:
+        # Check if one name starts with the other (important for NCAA: "Gonzaga" matches "Gonzaga Bulldogs")
+        if full_key.startswith(outcome_key) or outcome_key.startswith(full_key):
             return True
 
-        if outcome_key in full_key:
+        # Check if last word matches (nickname matching)
+        # e.g., "Miami Heat" matches "Heat", "New York Knicks" matches "Knicks"
+        words_full = full_key.split()
+        words_outcome = outcome_key.split()
+        if words_full and words_outcome and words_full[-1] == words_outcome[-1]:
             return True
+
+        # Check if one contains the other
+        if outcome_key in full_key or full_key in outcome_key:
+            return True
+
+        # Check if first word matches (for NCAA: school name is usually first word)
+        # e.g., "Gonzaga" matches "Gonzaga Bulldogs"
+        if words_full and words_outcome:
+            if words_full[0] == words_outcome[0] and len(words_full[0]) > 3:
+                return True
+
+        # Check if all words from shorter name are in longer name
+        # e.g., "Trail Blazers" matches "Portland Trail Blazers"
+        if len(words_full) > 1 and len(words_outcome) > 1:
+            shorter = words_outcome if len(words_outcome) < len(words_full) else words_full
+            longer = words_full if len(words_full) > len(words_outcome) else words_outcome
+            if all(word in longer for word in shorter if len(word) > 2):
+                return True
 
         return False
 
@@ -311,13 +336,28 @@ class SpreadValueBetService:
         out: dict[tuple[str, float], float] = {}
 
         def _keys_for_team(team: str) -> list[str]:
+            """
+            Generate multiple normalized keys for a team to improve matching.
+            For NCAA: "Gonzaga Bulldogs" -> ["gonzaga bulldogs", "bulldogs", "gonzaga"]
+            """
             norm = self._normalize_team_name(team)
             if not norm:
                 return []
-            last = norm.split()[-1]
-            keys = [norm]
-            if last not in keys:
-                keys.append(last)
+            words = norm.split()
+            keys = [norm]  # Full normalized name
+            
+            # Add last word (nickname) - e.g., "Bulldogs"
+            if len(words) > 1:
+                last = words[-1]
+                if last not in keys:
+                    keys.append(last)
+            
+            # Add first word (for NCAA school names) - e.g., "Gonzaga"
+            if len(words) > 1 and len(words[0]) > 3:
+                first = words[0]
+                if first not in keys:
+                    keys.append(first)
+            
             return keys
 
         for s in self.sportsbook_spreads:
@@ -399,9 +439,24 @@ class SpreadValueBetService:
             ref_norm = self._normalize_team_name(ref_team)
             pt = float(ref_line) if (outcome_norm and ref_norm and (outcome_norm == ref_norm)) else -float(ref_line)
 
-            key = (outcome_norm, self._pt_key(pt))
-            p_true = true_prob_by_team_line.get(key)
-            matched = p_true is not None
+            # Try multiple keys for matching (full name, last word, first word for NCAA)
+            outcome_words = outcome_norm.split() if outcome_norm else []
+            keys_to_try = [outcome_norm]
+            if len(outcome_words) > 1:
+                if outcome_words[-1] not in keys_to_try:
+                    keys_to_try.append(outcome_words[-1])  # Last word (nickname)
+                if len(outcome_words[0]) > 3 and outcome_words[0] not in keys_to_try:
+                    keys_to_try.append(outcome_words[0])  # First word (for NCAA)
+            
+            # Try each key until we find a match
+            p_true = None
+            matched = False
+            for key_name in keys_to_try:
+                key = (key_name, self._pt_key(pt))
+                p_true = true_prob_by_team_line.get(key)
+                if p_true is not None:
+                    matched = True
+                    break
 
             ask = float(m.best_ask) if m.best_ask is not None else None
             expected: Optional[float] = None
