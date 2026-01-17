@@ -11,8 +11,10 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import List, Optional
 
-from pinnacle_scraper.pinnacle_sportsbook_odds_interface import MoneylineOdds, SpreadOdds, TotalsOdds
-from polymarket_odds_service.polymarket_market_analyzer import MarketOdds
+from pinnacle_scraper.sportsbook_odds import SportsbookOdds, HandicapOdds, TotalOdds
+from polymarket_odds_service.polymarket_odds import PolymarketOdds
+
+MarketOdds = PolymarketOdds.MarketOdds
 
 
 @dataclass(frozen=True)
@@ -122,7 +124,7 @@ def _print_error_summary(error_type: str, details: str):
     print("=" * 80 + "\n")
 
 
-def print_sportsbook_odds(sportsbook_result: Optional[MoneylineOdds]):
+def print_sportsbook_odds(sportsbook_result: Optional[SportsbookOdds]):
     print("\n" + "=" * 80)
     print("SPORTSBOOK ODDS")
     print("=" * 80)
@@ -133,7 +135,7 @@ def print_sportsbook_odds(sportsbook_result: Optional[MoneylineOdds]):
     print("=" * 80)
 
 
-def print_sportsbook_spread_odds(spreads: Optional[List[SpreadOdds]]):
+def print_sportsbook_spread_odds(spreads: Optional[List[HandicapOdds]]):
     """
     Print sportsbook spread odds in the same banner style as moneyline.
     """
@@ -146,9 +148,9 @@ def print_sportsbook_spread_odds(spreads: Optional[List[SpreadOdds]]):
         print("=" * 80)
         return
     
-    def _sort_key(s: SpreadOdds):
+    def _sort_key(s: HandicapOdds):
         try:
-            return abs(float(s.away_point))
+            return abs(float(s.point)) if s.point else 0.0
         except Exception:
             return 0.0
     
@@ -158,7 +160,7 @@ def print_sportsbook_spread_odds(spreads: Optional[List[SpreadOdds]]):
     print("=" * 80)
 
 
-def print_sportsbook_totals_odds(totals: Optional[List[TotalsOdds]]):
+def print_sportsbook_totals_odds(totals: Optional[List[TotalOdds]]):
     """
     Print sportsbook totals odds in the same banner style as moneyline.
     """
@@ -171,9 +173,9 @@ def print_sportsbook_totals_odds(totals: Optional[List[TotalsOdds]]):
         print("=" * 80)
         return
 
-    def _sort_key(t: TotalsOdds):
+    def _sort_key(t: TotalOdds):
         try:
-            return float(t.total_point)
+            return float(t.point) if t.point else 0.0
         except Exception:
             return 0.0
 

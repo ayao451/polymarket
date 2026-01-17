@@ -3,10 +3,19 @@
 Shared helper functions for value betting bots.
 """
 
-from datetime import datetime, date
-from typing import List, Tuple, Dict, Optional
-from polymarket_odds_service.find_game import PolymarketGameFinder
-from polymarket_odds_service.polymarket_market_analyzer import PolymarketMarketAnalyzer
+from datetime import datetime, date, timezone
+from typing import List, Tuple, Dict, Optional, Any
+import sys
+import os
+import re
+import requests
+
+# Add project root to path for archive imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from archive.find_game import PolymarketGameFinder
+from archive.polymarket_market_analyzer import PolymarketMarketAnalyzer
+
 
 
 def normalize_team_name(s: str) -> str:
@@ -113,46 +122,33 @@ def is_slug_basketball(slug_lower: str, include_nba: bool = True, include_ncaa: 
 
 def fetch_polymarket_events_for_date(
     target_date: date,
-    include_nba: bool = True,
-    include_ncaa: bool = True,
-    international_prefixes: Optional[List[str]] = None,
-    league_filter: Optional[str] = None,
+    whitelisted_prefixes: Optional[List[str]] = None,
+    verbose: bool = False,
 ) -> List[Tuple[str, str, str]]:
     """
-    Fetch all Polymarket basketball events for a given date.
+    Fetch all Polymarket events for a given date, filtered by whitelisted prefixes.
     
     Args:
         target_date: Date to fetch events for
-        include_nba: Whether to include NBA games
-        include_ncaa: Whether to include NCAA games
-        international_prefixes: List of international league prefixes to include
-        league_filter: Optional league filter (e.g., "bkcba" to only include events with this in slug)
+        whitelisted_prefixes: List of prefixes to filter events by (e.g., ["nba", "cbb", "nhl"]).
+                              If None, includes all events (caller should filter).
+        verbose: If True, print detailed progress information.
     
     Returns:
         List of tuples: (event_slug, away_team, home_team)
     """
+    if verbose:
+        print(f"\n[POLYMARKET] Fetching events for {target_date}")
+        print(f"  Whitelisted prefixes: {whitelisted_prefixes}")
+    
     finder = PolymarketGameFinder()
     events_list = []
     seen_slugs = set()
     
-    # Default international prefixes if not specified
-    if international_prefixes is None:
-        international_prefixes = [
-            "euroleague",
-            "eurocup",
-            "fib",
-            "bkkbl",
-            "bkarg",
-            "bkfr1",
-            "bkcba",
-            "bknbl",
-            "bkseriea",
-            "bkligend",
-            "bkcl",
-        ]
-    
     # Fetch events pages
     for active_only in (True, False):
+        if verbose:
+            print(f"  Searching {'active' if active_only else 'inactive'} events...")
         for page in range(100):  # Search up to 100 pages
             events = finder.fetch_events_page(
                 limit=100,
@@ -186,40 +182,31 @@ def fetch_polymarket_events_for_date(
                     continue
                 seen_slugs.add(slug)
                 
-                # Apply league filter if specified
-                if league_filter and league_filter.lower() not in slug_lower:
-                    continue
-                
                 # Exclude WNBA games
                 if slug_lower.startswith("cwbb-") or slug_lower.startswith("cwbb"):
                     continue
+                
+                # Filter by whitelisted prefixes if specified
+                if whitelisted_prefixes:
+                    matches_prefix = False
+                    for prefix in whitelisted_prefixes:
+                        prefix_lower = prefix.lower().strip()
+                        if not prefix_lower:
+                            continue
+                        # Check if slug starts with prefix or contains it with dashes
+                        if (slug_lower.startswith(prefix_lower) or 
+                            f"-{prefix_lower}-" in slug_lower or
+                            slug_lower.startswith(f"{prefix_lower}-")):
+                            matches_prefix = True
+                            break
+                    if not matches_prefix:
+                        continue
                 
                 # Extract title
                 title_raw = event.get("title") or ""
                 if not title_raw:
                     continue
                 title = str(title_raw).strip()
-                
-                # Filter for basketball events
-                is_basketball = is_slug_basketball(
-                    slug_lower, 
-                    include_nba=include_nba,
-                    include_ncaa=include_ncaa,
-                    international_prefixes=international_prefixes
-                )
-                
-                if not is_basketball:
-                    title_lower = title.lower()
-                    is_basketball = (
-                        "basketball" in title_lower or
-                        ("nba" in title_lower and include_nba) or
-                        ("ncaa" in title_lower and include_ncaa) or
-                        ("college basketball" in title_lower and include_ncaa) or
-                        ("cbb" in title_lower and include_ncaa)
-                    )
-                
-                if not is_basketball:
-                    continue
                 
                 # Exclude esports
                 title_lower = title.lower()
@@ -243,58 +230,85 @@ def fetch_polymarket_events_for_date(
                 
                 if away and home:
                     events_list.append((slug, away, home))
+                    if verbose:
+                        print(f"    + Found: {slug} | {away} @ {home}")
     
+    if verbose:
+        print(f"\n[POLYMARKET] Total events found: {len(events_list)}")
     return events_list
 
 
-def fetch_all_events_and_markets(event_slugs: List[str], verbose: bool = False) -> Tuple[Dict[str, Dict], Dict[str, Dict[str, List[str]]]]:
+def fetch_market_slugs_by_event(event_slugs: List[str], verbose: bool = False) -> Dict[str, Dict[str, List[str]]]:
     """
-    Fetch all event data and market slugs for each event upfront.
+    Fetch market slugs for each event slug.
+    
+    Note: This function fetches event data temporarily to extract market slugs, but
+    does not return the event data. Only market slugs are returned.
     
     Args:
-        event_slugs: List of event slugs to fetch
+        event_slugs: List of event slugs to fetch market slugs for
         verbose: If True, print detailed logs about fetching events
     
     Returns:
-        Tuple of:
-        1. Dict mapping event_slug -> event_data (raw event dict from API)
-        2. Dict mapping event_slug -> {
+        Dict mapping event_slug -> {
             'moneyline': [market_slug],
             'spreads': [market_slug1, market_slug2, ...],
             'totals': [market_slug1, market_slug2, ...]
         }
     """
+    if verbose:
+        print(f"\n[POLYMARKET] Fetching market slugs for {len(event_slugs)} events...")
+    
     analyzer = PolymarketMarketAnalyzer(verbose=verbose)
-    events_cache = {}
     market_slugs_map = {}
     
-    for event_slug in event_slugs:
+    for i, event_slug in enumerate(event_slugs, 1):
         try:
+            # Fetch event data temporarily to extract market slugs
             event = analyzer.fetch_event_by_slug(event_slug)
             if not event:
+                if verbose:
+                    print(f"  [{i}/{len(event_slugs)}] {event_slug} - FAILED to fetch")
                 continue
             
-            # Cache the event data
-            events_cache[event_slug] = event
+            # Extract market slugs (event data is discarded after this)
+            spreads = PolymarketMarketAnalyzer.spread_market_slugs_from_event(event)
+            totals = PolymarketMarketAnalyzer.totals_market_slugs_from_event(event)
             
-            # Extract market slugs
             markets = {
                 'moneyline': [event_slug],  # Moneyline uses event_slug
-                'spreads': PolymarketMarketAnalyzer.spread_market_slugs_from_event(event),
-                'totals': PolymarketMarketAnalyzer.totals_market_slugs_from_event(event),
+                'spreads': spreads,
+                'totals': totals,
             }
             market_slugs_map[event_slug] = markets
-        except Exception:
+            
+            if verbose:
+                print(f"  [{i}/{len(event_slugs)}] {event_slug}")
+                print(f"      Moneyline: {event_slug}")
+                if spreads:
+                    print(f"      Spreads ({len(spreads)}): {spreads}")
+                else:
+                    print(f"      Spreads: None")
+                if totals:
+                    print(f"      Totals ({len(totals)}): {totals}")
+                else:
+                    print(f"      Totals: None")
+                
+        except Exception as e:
+            if verbose:
+                print(f"  [{i}/{len(event_slugs)}] {event_slug} - ERROR: {e}")
             continue
     
-    return events_cache, market_slugs_map
+    if verbose:
+        print(f"\n[POLYMARKET] Successfully fetched market slugs for {len(market_slugs_map)}/{len(event_slugs)} events")
+    return market_slugs_map
 
 
 def match_games_and_fetch_markets(
     polymarket_events: List[Tuple[str, str, str]],
     pinnacle_games: List,
     verbose: bool = False,
-) -> Tuple[List[Tuple[str, str, str, object]], Dict[str, Dict], Dict[str, Dict[str, List[str]]]]:
+) -> Tuple[List[Tuple[str, str, str, object]], Dict[str, Dict[str, List[str]]]]:
     """
     Match Polymarket events with Pinnacle games by team names, and fetch market slugs for matched events.
     
@@ -306,15 +320,13 @@ def match_games_and_fetch_markets(
     Returns:
         Tuple of:
         1. List of (event_slug, away_team, home_team, pinnacle_game) tuples for matched games
-        2. Dict mapping event_slug -> event_data (raw event dict from API)
-        3. Dict mapping event_slug -> {
+        2. Dict mapping event_slug -> {
             'moneyline': [market_slug],
             'spreads': [market_slug1, market_slug2, ...],
             'totals': [market_slug1, market_slug2, ...]
         }
     """
     matched = []
-    events_cache = {}
     market_slugs_map = {}
     analyzer = PolymarketMarketAnalyzer(verbose=verbose)
     
@@ -335,11 +347,10 @@ def match_games_and_fetch_markets(
                 # Use Pinnacle team names and include the full Pinnacle game object
                 matched.append((event_slug, pin_away, pin_home, pinnacle_game))
                 
-                # Fetch event data and market slugs for this matched event
+                # Fetch event data temporarily to extract market slugs
                 try:
                     event = analyzer.fetch_event_by_slug(event_slug)
                     if event:
-                        events_cache[event_slug] = event
                         markets = {
                             'moneyline': [event_slug],  # Moneyline uses event_slug
                             'spreads': PolymarketMarketAnalyzer.spread_market_slugs_from_event(event),
@@ -350,7 +361,7 @@ def match_games_and_fetch_markets(
                     pass
                 break
     
-    return matched, events_cache, market_slugs_map
+    return matched, market_slugs_map
 
 
 # Backwards-compatible wrapper (for value_bets.py which still uses old flow)
@@ -365,5 +376,5 @@ def match_games(
     Returns:
         List of (event_slug, away_team, home_team, pinnacle_game) tuples for matched games.
     """
-    matched, _, _ = match_games_and_fetch_markets(polymarket_events, pinnacle_games, verbose=False)
+    matched, _ = match_games_and_fetch_markets(polymarket_events, pinnacle_games, verbose=False)
     return matched

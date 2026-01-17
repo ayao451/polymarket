@@ -143,72 +143,23 @@ class PolymarketMarketAnalyzer:
     @staticmethod
     def totals_market_slugs_from_event(event: Dict) -> List[str]:
         """
-        Given a Gamma event payload (from /events/slug/{event_slug}), return the list of
-        full-game totals market slugs, e.g. "nba-sas-okc-2026-01-13-total-229pt5".
-
-        Heuristics:
-        - include if question contains "o/u" or "total" (case-insensitive), OR
-        - include if sportsMarketType contains "total", OR
-        - include if slug contains "-total-"
-
-        Exclusions:
-        - exclude first half totals (e.g. "1H O/U" / "first_half_totals" / slug contains "-1h-")
+        Given a Gamma event payload, return totals market slugs.
+        
+        Simple rule: if the slug contains "total", it's a totals market.
         """
         if not isinstance(event, dict):
             return []
 
         out: List[str] = []
-        markets = event.get("markets", []) or []
-        for m in markets:
-            try:
-                if not isinstance(m, dict):
-                    continue
-                q = str(m.get("question") or "")
-                smt = str(m.get("sportsMarketType") or "")
-                slug_raw = m.get("slug") or ""
-                if not slug_raw:
-                    continue
-                # Strip once when extracting from event
-                slug = str(slug_raw).strip()
-
-                q_low = q.lower()
-                smt_low = smt.lower()
-                slug_low = slug.lower()
-
-                is_first_half = (
-                    q_low.startswith("1h ")
-                    or "1h o/u" in q_low
-                    or "1h total" in q_low
-                    or "first half" in q_low
-                    or "first_half" in smt_low
-                    or "first half" in smt_low
-                    or "-1h-" in slug_low
-                    or slug_low.startswith("1h-")
-                )
-                if is_first_half:
-                    continue
-
-                is_total = (
-                    ("o/u" in q_low)
-                    or ("total" in q_low)
-                    or ("total" in smt_low)
-                    or ("-total-" in slug_low)
-                )
-                if not is_total:
-                    continue
-                if slug:
-                    out.append(slug)
-            except Exception:
+        for m in event.get("markets", []) or []:
+            if not isinstance(m, dict):
                 continue
+            slug = str(m.get("slug") or "").strip()
+            if slug and "total" in slug.lower():
+                out.append(slug)
 
-        seen = set()
-        deduped: List[str] = []
-        for s in out:
-            if s in seen:
-                continue
-            seen.add(s)
-            deduped.append(s)
-        return deduped
+        # De-dup while keeping order
+        return list(dict.fromkeys(out))
 
     def get_spread_market_slugs_for_event(self, event_slug: str) -> List[str]:
         """

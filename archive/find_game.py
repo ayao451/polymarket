@@ -172,4 +172,3 @@ class PolymarketGameFinder:
                         return slug
 
         return None
-

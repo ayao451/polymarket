@@ -22,8 +22,10 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional
 
-from pinnacle_scraper.pinnacle_sportsbook_odds_interface import MoneylineOdds, SpreadOdds, TotalsOdds
-from polymarket_odds_service.polymarket_market_analyzer import MarketOdds
+from pinnacle_scraper.sportsbook_odds import SportsbookOdds, HandicapOdds, TotalOdds
+from polymarket_odds_service.polymarket_odds import PolymarketOdds
+
+MarketOdds = PolymarketOdds.MarketOdds
 
 
 @dataclass(frozen=True)
@@ -51,13 +53,13 @@ class ValueBetService:
         self,
         away_team: str,
         home_team: str,
-        sportsbook_result: Optional[MoneylineOdds],
-        polymarket_results: List[MarketOdds],
+        sportsbook_result: Optional[SportsbookOdds],
+        verbose: bool = False,
     ) -> None:
         self.away_team = away_team
         self.home_team = home_team
         self.sportsbook_result = sportsbook_result
-        self.polymarket_results = polymarket_results
+        self.verbose = verbose
 
     @staticmethod
     def _normalize_team_name(s: str) -> str:
@@ -117,14 +119,23 @@ class ValueBetService:
     @staticmethod
     def _extract_outcome_team(market_label: str) -> Optional[str]:
         """
-        Parse Polymarket market label like "Bulls vs. Pistons (Bulls)" -> "Bulls".
+        Parse Polymarket market label.
+        
+        Handles both:
+        - Full format: "Bulls vs. Pistons (Bulls)" -> "Bulls"
+        - Simple format: "Heat" -> "Heat"
         """
         if not market_label:
             return None
-        if "(" not in market_label or ")" not in market_label:
-            return None
-        inside = market_label.split("(", 1)[1].rsplit(")", 1)[0].strip()
-        return inside or None
+        
+        # First try to extract from parentheses
+        if "(" in market_label and ")" in market_label:
+            inside = market_label.split("(", 1)[1].rsplit(")", 1)[0].strip()
+            if inside:
+                return inside
+        
+        # If no parentheses, return the whole label (it's probably just the team name)
+        return market_label.strip() or None
 
     @staticmethod
     def _devig(q1: float, q2: float) -> Optional[tuple[float, float]]:
@@ -155,21 +166,94 @@ class ValueBetService:
 
     def _true_prob_for_outcome(self, outcome_team: str) -> Optional[float]:
         """
-        Return the no-vig (true) probability for this outcome (away/home), or None if unknown.
+        Return the no-vig (true) probability for this outcome (outcome_1/outcome_2), or None if unknown.
         """
         if self.sportsbook_result is None:
             return None
 
         sb = self.sportsbook_result
-        devigged = self._devig(sb.away_cost_to_win_1, sb.home_cost_to_win_1)
+        devigged = self._devig(sb.outcome_1_cost_to_win_1, sb.outcome_2_cost_to_win_1)
         if devigged is None:
             return None
-        p_away, p_home = devigged
+        p_outcome_1, p_outcome_2 = devigged
 
         if self._team_matches_outcome(self.away_team, outcome_team):
-            return float(p_away)
+            return float(p_outcome_1)
         if self._team_matches_outcome(self.home_team, outcome_team):
-            return float(p_home)
+            return float(p_outcome_2)
+        return None
+
+    def evaluate_single(self, m: MarketOdds) -> Optional[ValueBet]:
+        """
+        Evaluate a single MarketOdds against sportsbook odds.
+        Returns a ValueBet if it's a value bet, None otherwise.
+        """
+        if self.verbose:
+            print(f"\n    [EVAL] Evaluating outcome: {m.market}")
+        
+        if m.best_ask is None:
+            if self.verbose:
+                print(f"    [SKIP] No best_ask available")
+            return None
+
+        outcome_team = self._extract_outcome_team(m.market)
+        if not outcome_team:
+            if self.verbose:
+                print(f"    [SKIP] Could not extract outcome team from market label")
+            return None
+        if self.verbose:
+            print(f"    [EVAL] Extracted outcome team: '{outcome_team}'")
+
+        # Show sportsbook odds for devigging
+        if self.verbose and self.sportsbook_result:
+            sb = self.sportsbook_result
+            print(f"    [EVAL] Sportsbook odds: {sb.outcome_1}=${sb.outcome_1_cost_to_win_1:.3f}, {sb.outcome_2}=${sb.outcome_2_cost_to_win_1:.3f}")
+            devigged = self._devig(sb.outcome_1_cost_to_win_1, sb.outcome_2_cost_to_win_1)
+            if devigged:
+                print(f"    [EVAL] Devigged probs: {sb.outcome_1}={devigged[0]*100:.2f}%, {sb.outcome_2}={devigged[1]*100:.2f}%")
+
+        p_true = self._true_prob_for_outcome(outcome_team)
+        if p_true is None:
+            if self.verbose:
+                print(f"    [SKIP] Could not match outcome team '{outcome_team}' to either '{self.away_team}' or '{self.home_team}'")
+            return None
+        if self.verbose:
+            print(f"    [EVAL] True probability for '{outcome_team}': {p_true*100:.2f}%")
+        
+        if float(p_true) < self.MIN_TRUE_PROB:
+            if self.verbose:
+                print(f"    [SKIP] True prob {p_true*100:.2f}% below minimum {self.MIN_TRUE_PROB*100:.2f}%")
+            return None
+
+        polymarket_ask = float(m.best_ask)
+        if polymarket_ask <= 0:
+            if self.verbose:
+                print(f"    [SKIP] Invalid polymarket ask: {polymarket_ask}")
+            return None
+
+        payout_per_1 = 1.0 / polymarket_ask  # $ payout if the $1 stake wins
+        expected_payout = float(p_true) * float(payout_per_1)
+        
+        if self.verbose:
+            print(f"    [CALC] Polymarket ask price: ${polymarket_ask:.4f} ({polymarket_ask*100:.2f}%)")
+            print(f"    [CALC] Payout per $1 if win: ${payout_per_1:.4f}")
+            print(f"    [CALC] Expected payout = true_prob * payout = {p_true:.4f} * {payout_per_1:.4f} = ${expected_payout:.4f}")
+            print(f"    [CALC] Threshold: ${self.MIN_EXPECTED_PAYOUT_PER_1:.4f}")
+            print(f"    [CALC] Edge: {(expected_payout - 1.0) * 100:.2f}%")
+
+        # Value bet if expected payout exceeds threshold (stake is $1).
+        if expected_payout > self.MIN_EXPECTED_PAYOUT_PER_1:
+            if self.verbose:
+                print(f"    [VALUE BET!] Expected payout ${expected_payout:.4f} > threshold ${self.MIN_EXPECTED_PAYOUT_PER_1:.4f}")
+            return ValueBet(
+                team=outcome_team,
+                token_id=m.token_id,
+                true_prob=float(p_true),
+                polymarket_best_ask=polymarket_ask,
+                expected_payout_per_1=expected_payout,
+            )
+        if self.verbose:
+            print(f"    [NO VALUE] Expected payout ${expected_payout:.4f} <= threshold ${self.MIN_EXPECTED_PAYOUT_PER_1:.4f}")
         return None
 
     def discover_value_bets(self) -> List[ValueBet]:
@@ -179,37 +263,9 @@ class ValueBetService:
         value_bets: List[ValueBet] = []
 
         for m in self.polymarket_results:
-            if m.best_ask is None:
-                continue
-
-            outcome_team = self._extract_outcome_team(m.market)
-            if not outcome_team:
-                continue
-
-            p_true = self._true_prob_for_outcome(outcome_team)
-            if p_true is None:
-                continue
-            if float(p_true) < self.MIN_TRUE_PROB:
-                continue
-
-            polymarket_ask = float(m.best_ask)
-            if polymarket_ask <= 0:
-                continue
-
-            payout_per_1 = 1.0 / polymarket_ask  # $ payout if the $1 stake wins
-            expected_payout = float(p_true) * float(payout_per_1)
-
-            # Value bet if expected payout exceeds threshold (stake is $1).
-            if expected_payout > self.MIN_EXPECTED_PAYOUT_PER_1:
-                value_bets.append(
-                    ValueBet(
-                        team=outcome_team,
-                        token_id=m.token_id,
-                        true_prob=float(p_true),
-                        polymarket_best_ask=polymarket_ask,
-                        expected_payout_per_1=expected_payout,
-                    )
-                )
+            bet = self.evaluate_single(m)
+            if bet is not None:
+                value_bets.append(bet)
 
         # Sort by highest expected profit per $1 stake.
         return sorted(
@@ -250,11 +306,21 @@ class SpreadValueBetService:
     def __init__(
         self,
         *,
-        sportsbook_spreads: List[SpreadOdds],
+        sportsbook_spreads: List[HandicapOdds],
         polymarket_spread_results: List[MarketOdds],
+        polymarket_spread_side: Optional[str] = None,  # 'away' or 'home'
+        polymarket_spread_line: Optional[float] = None,  # e.g., 2.5
+        away_team: Optional[str] = None,
+        home_team: Optional[str] = None,
+        verbose: bool = False,
     ) -> None:
         self.sportsbook_spreads = sportsbook_spreads or []
         self.polymarket_spread_results = polymarket_spread_results or []
+        self.polymarket_spread_side = polymarket_spread_side
+        self.polymarket_spread_line = polymarket_spread_line
+        self.away_team = away_team
+        self.home_team = home_team
+        self.verbose = verbose
 
     @staticmethod
     def _normalize_team_name(s: str) -> str:
@@ -361,14 +427,15 @@ class SpreadValueBetService:
             return keys
 
         for s in self.sportsbook_spreads:
-            devigged = ValueBetService._devig(s.away_cost_to_win_1, s.home_cost_to_win_1)
+            devigged = ValueBetService._devig(s.outcome_1_cost_to_win_1, s.outcome_2_cost_to_win_1)
             if devigged is None:
                 continue
-            p_away, p_home = devigged
-            for k in _keys_for_team(s.away_team):
-                out[(k, self._pt_key(s.away_point))] = float(p_away)
-            for k in _keys_for_team(s.home_team):
-                out[(k, self._pt_key(s.home_point))] = float(p_home)
+            p_outcome_1, p_outcome_2 = devigged
+            # outcome_1 has the spread point, outcome_2 has the opposite
+            for k in _keys_for_team(s.outcome_1):
+                out[(k, self._pt_key(s.point))] = float(p_outcome_1)
+            for k in _keys_for_team(s.outcome_2):
+                out[(k, self._pt_key(-s.point))] = float(p_outcome_2)
         return out
 
     @dataclass(frozen=True)
@@ -383,24 +450,139 @@ class SpreadValueBetService:
         is_value_bet: bool
 
     def discover_value_bets(self) -> List[SpreadValueBet]:
-        evaluations = self.evaluate()
+        if self.verbose:
+            print(f"\n    [SPREAD EVAL] Starting spread value bet discovery")
+            print(f"    [SPREAD EVAL] From slug: {self.polymarket_spread_side} team +{self.polymarket_spread_line}")
+            print(f"    [SPREAD EVAL] Away team: {self.away_team}, Home team: {self.home_team}")
+            print(f"    [SPREAD EVAL] Sportsbook spreads: {len(self.sportsbook_spreads)}")
+        
+        # Build true prob map
+        true_prob_by_team_line = self._build_true_prob_map()
+        if self.verbose:
+            print(f"    [SPREAD EVAL] True prob map keys: {list(true_prob_by_team_line.keys())}")
+            for i, s in enumerate(self.sportsbook_spreads, 1):
+                devigged = ValueBetService._devig(s.outcome_1_cost_to_win_1, s.outcome_2_cost_to_win_1)
+                if devigged:
+                    print(f"      Line {i}: {s.outcome_1} ({s.point:+g}) @ ${s.outcome_1_cost_to_win_1:.3f} -> {devigged[0]*100:.2f}%")
+                    print(f"              {s.outcome_2} ({-s.point:+g}) @ ${s.outcome_2_cost_to_win_1:.3f} -> {devigged[1]*100:.2f}%")
+            print(f"    [SPREAD EVAL] Polymarket outcomes: {len(self.polymarket_spread_results)}")
+            for m in self.polymarket_spread_results:
+                print(f"      -> {m.market}: ask={m.best_ask}")
+        
         value_bets: List[SpreadValueBet] = []
-        for ev in evaluations.values():
-            if not ev.is_value_bet:
+        
+        # Determine the spread line and which team is favored
+        if self.polymarket_spread_line is None:
+            if self.verbose:
+                print(f"    [SPREAD EVAL] No spread line available from slug, cannot evaluate")
+            return []
+        
+        spread_line = self.polymarket_spread_line
+        
+        for m in self.polymarket_spread_results:
+            if self.verbose:
+                print(f"\n    [SPREAD EVAL] Processing outcome: {m.market}")
+            if m.best_ask is None:
+                if self.verbose:
+                    print(f"      [SKIP] No best_ask")
                 continue
-            if ev.true_prob is None or ev.polymarket_best_ask is None or ev.expected_payout_per_1 is None:
+            
+            outcome_team = m.market.strip()
+            if self.verbose:
+                print(f"      Outcome team: '{outcome_team}'")
+            
+            is_away = ValueBetService._team_matches_outcome(self.away_team or "", outcome_team)
+            is_home = ValueBetService._team_matches_outcome(self.home_team or "", outcome_team)
+            if self.verbose:
+                print(f"      Matches away ({self.away_team}): {is_away}")
+                print(f"      Matches home ({self.home_team}): {is_home}")
+            
+            if not is_away and not is_home:
+                if self.verbose:
+                    print(f"      [SKIP] Could not match outcome to away or home team")
                 continue
-            value_bets.append(
-                SpreadValueBet(
-                    team=str(ev.team),
-                    point=float(ev.point),
-                    token_id=str(ev.token_id),
-                    true_prob=float(ev.true_prob),
-                    polymarket_best_ask=float(ev.polymarket_best_ask),
-                    expected_payout_per_1=float(ev.expected_payout_per_1),
+            
+            # Determine the spread for this outcome
+            if self.polymarket_spread_side == 'away':
+                if is_away:
+                    pt = -spread_line
+                else:
+                    pt = spread_line
+            else:
+                if is_home:
+                    pt = -spread_line
+                else:
+                    pt = spread_line
+            
+            if self.verbose:
+                print(f"      Outcome spread: {pt:+g}")
+            
+            # Try to find matching true probability
+            outcome_norm = self._normalize_team_name(outcome_team)
+            outcome_words = outcome_norm.split() if outcome_norm else []
+            keys_to_try = [outcome_norm]
+            if len(outcome_words) > 1:
+                if outcome_words[-1] not in keys_to_try:
+                    keys_to_try.append(outcome_words[-1])
+                if len(outcome_words[0]) > 3 and outcome_words[0] not in keys_to_try:
+                    keys_to_try.append(outcome_words[0])
+            
+            p_true = None
+            matched = False
+            for key_name in keys_to_try:
+                key = (key_name, self._pt_key(pt))
+                if self.verbose:
+                    print(f"      Trying key: {key}")
+                p_true = true_prob_by_team_line.get(key)
+                if p_true is not None:
+                    matched = True
+                    if self.verbose:
+                        print(f"      Matched! True prob: {p_true*100:.2f}%")
+                    break
+            
+            if not matched:
+                if self.verbose:
+                    print(f"      [SKIP] No matching sportsbook line")
+                continue
+            
+            if float(p_true) < self.MIN_TRUE_PROB:
+                if self.verbose:
+                    print(f"      [SKIP] True prob {p_true*100:.2f}% below min {self.MIN_TRUE_PROB*100:.2f}%")
+                continue
+            
+            ask = float(m.best_ask)
+            if ask <= 0:
+                if self.verbose:
+                    print(f"      [SKIP] Invalid ask: {ask}")
+                continue
+            
+            payout_per_1 = 1.0 / ask
+            expected = float(p_true) * payout_per_1
+            if self.verbose:
+                print(f"      Polymarket ask: ${ask:.4f} ({ask*100:.2f}%)")
+                print(f"      Payout per $1 if win: ${payout_per_1:.4f}")
+                print(f"      Expected payout: {p_true:.4f} * {payout_per_1:.4f} = ${expected:.4f}")
+                print(f"      Edge: {(expected-1)*100:.2f}% (threshold: >{(self.MIN_EXPECTED_PAYOUT_PER_1-1)*100:.2f}%)")
+            
+            if expected > self.MIN_EXPECTED_PAYOUT_PER_1:
+                if self.verbose:
+                    print(f"      [VALUE BET!] ${expected:.4f} > ${self.MIN_EXPECTED_PAYOUT_PER_1:.4f}")
+                value_bets.append(
+                    SpreadValueBet(
+                        team=str(outcome_team),
+                        point=float(pt),
+                        token_id=str(m.token_id),
+                        true_prob=float(p_true),
+                        polymarket_best_ask=float(ask),
+                        expected_payout_per_1=float(expected),
+                    )
                 )
-            )
+            else:
+                if self.verbose:
+                    print(f"      [NO VALUE] ${expected:.4f} <= ${self.MIN_EXPECTED_PAYOUT_PER_1:.4f}")
 
+        if self.verbose:
+            print(f"\n    [SPREAD EVAL] Total value bets found: {len(value_bets)}")
         return sorted(value_bets, key=lambda vb: (vb.expected_payout_per_1 - 1.0), reverse=True)
 
     def evaluate(self) -> dict[str, "SpreadValueBetService.SpreadOutcomeEvaluation"]:
@@ -512,22 +694,38 @@ class TotalsValueBetService:
     def __init__(
         self,
         *,
-        sportsbook_totals: List[TotalsOdds],
+        sportsbook_totals: List[TotalOdds],
         polymarket_totals_results: List[MarketOdds],
+        polymarket_line: Optional[float] = None,
+        verbose: bool = False,
     ) -> None:
         self.sportsbook_totals = sportsbook_totals or []
         self.polymarket_totals_results = polymarket_totals_results or []
+        self.polymarket_line = polymarket_line  # Total line parsed from slug (e.g., 228.5)
+        self.verbose = verbose
 
     @staticmethod
     def _extract_outcome_label(market_label: str) -> Optional[str]:
-        # last parenthesized segment
+        """
+        Extract outcome label from market label.
+        
+        Handles:
+        - Simple labels: "Over", "Under"
+        - Parenthesized: "O/U 228.5 (Over)" -> "Over"
+        """
         if not market_label:
             return None
+        
+        # First try to extract from parentheses
         start = market_label.rfind("(")
         end = market_label.rfind(")")
-        if start == -1 or end == -1 or end <= start:
-            return None
-        return market_label[start + 1 : end].strip() or None
+        if start != -1 and end != -1 and end > start:
+            inside = market_label[start + 1 : end].strip()
+            if inside:
+                return inside
+        
+        # If no parentheses, return the whole label (it's probably just "Over" or "Under")
+        return market_label.strip() or None
 
     @staticmethod
     def _extract_question_text(market_label: str) -> str:
@@ -562,48 +760,107 @@ class TotalsValueBetService:
     def _build_true_prob_map(self) -> dict[tuple[str, float], float]:
         out: dict[tuple[str, float], float] = {}
         for t in self.sportsbook_totals:
-            devigged = ValueBetService._devig(t.over_cost_to_win_1, t.under_cost_to_win_1)
+            # outcome_1 = Over, outcome_2 = Under
+            devigged = ValueBetService._devig(t.outcome_1_cost_to_win_1, t.outcome_2_cost_to_win_1)
             if devigged is None:
                 continue
             p_over, p_under = devigged
-            key_pt = self._pt_key(t.total_point)
+            key_pt = self._pt_key(t.point)
             out[(self._side_key("Over"), key_pt)] = float(p_over)
             out[(self._side_key("Under"), key_pt)] = float(p_under)
         return out
 
     def discover_value_bets(self) -> List[TotalsValueBet]:
+        if self.verbose:
+            print(f"\n    [TOTALS EVAL] Starting totals value bet discovery")
+            print(f"    [TOTALS EVAL] Polymarket line from slug: {self.polymarket_line}")
+            print(f"    [TOTALS EVAL] Sportsbook totals: {len(self.sportsbook_totals)}")
+            for i, t in enumerate(self.sportsbook_totals, 1):
+                devigged = ValueBetService._devig(t.outcome_1_cost_to_win_1, t.outcome_2_cost_to_win_1)
+                if devigged:
+                    print(f"      Line {i}: Over {t.point} @ ${t.outcome_1_cost_to_win_1:.3f} -> {devigged[0]*100:.2f}%")
+                    print(f"              Under {t.point} @ ${t.outcome_2_cost_to_win_1:.3f} -> {devigged[1]*100:.2f}%")
+            print(f"    [TOTALS EVAL] Polymarket outcomes: {len(self.polymarket_totals_results)}")
+            for m in self.polymarket_totals_results:
+                print(f"      -> {m.market}: ask={m.best_ask}")
+        
         true_prob_by_side_line = self._build_true_prob_map()
+        if self.verbose:
+            print(f"    [TOTALS EVAL] True prob map keys: {list(true_prob_by_side_line.keys())}")
         value_bets: List[TotalsValueBet] = []
 
+        # Use the polymarket_line from slug if available
+        total_line = self.polymarket_line
+
         for m in self.polymarket_totals_results:
+            if self.verbose:
+                print(f"\n    [TOTALS EVAL] Processing: {m.market}")
             if m.best_ask is None:
+                if self.verbose:
+                    print(f"      [SKIP] No best_ask")
                 continue
 
+            # Extract side from market label (should be "Over" or "Under")
             outcome = self._extract_outcome_label(m.market)
             if not outcome:
+                if self.verbose:
+                    print(f"      [SKIP] Could not extract outcome label from '{m.market}'")
                 continue
             side = outcome.strip()
+            if self.verbose:
+                print(f"      Extracted side: '{side}'")
             if self._side_key(side) not in ("over", "under"):
+                if self.verbose:
+                    print(f"      [SKIP] Side '{side}' is not over/under")
                 continue
 
-            question = self._extract_question_text(m.market)
-            total_line = self._parse_total_line(question)
+            # Use the total line from slug (already parsed)
+            if self.verbose:
+                print(f"      Using total line from slug: {total_line}")
             if total_line is None:
+                # Fallback: try to parse from market label
+                question = self._extract_question_text(m.market)
+                total_line = self._parse_total_line(question)
+                if self.verbose:
+                    print(f"      Fallback - parsed from question '{question}': {total_line}")
+            
+            if total_line is None:
+                if self.verbose:
+                    print(f"      [SKIP] Could not determine total line")
                 continue
 
             key = (self._side_key(side), self._pt_key(total_line))
+            if self.verbose:
+                print(f"      Looking up key: {key}")
             p_true = true_prob_by_side_line.get(key)
             if p_true is None:
+                if self.verbose:
+                    print(f"      [SKIP] No matching sportsbook line for {key}")
                 continue
+            if self.verbose:
+                print(f"      Matched! True prob: {p_true*100:.2f}%")
             if float(p_true) < self.MIN_TRUE_PROB:
+                if self.verbose:
+                    print(f"      [SKIP] True prob {p_true*100:.2f}% below min {self.MIN_TRUE_PROB*100:.2f}%")
                 continue
 
             ask = float(m.best_ask)
             if ask <= 0:
+                if self.verbose:
+                    print(f"      [SKIP] Invalid ask: {ask}")
                 continue
 
-            expected = float(p_true) * (1.0 / ask)
+            payout_per_1 = 1.0 / ask
+            expected = float(p_true) * payout_per_1
+            if self.verbose:
+                print(f"      Polymarket ask: ${ask:.4f} ({ask*100:.2f}%)")
+                print(f"      Payout per $1 if win: ${payout_per_1:.4f}")
+                print(f"      Expected payout: {p_true:.4f} * {payout_per_1:.4f} = ${expected:.4f}")
+                print(f"      Edge: {(expected-1)*100:.2f}% (threshold: >{(self.MIN_EXPECTED_PAYOUT_PER_1-1)*100:.2f}%)")
+            
             if expected > self.MIN_EXPECTED_PAYOUT_PER_1:
+                if self.verbose:
+                    print(f"      [VALUE BET!] ${expected:.4f} > ${self.MIN_EXPECTED_PAYOUT_PER_1:.4f}")
                 value_bets.append(
                     TotalsValueBet(
                         side=side,
@@ -614,7 +871,12 @@ class TotalsValueBetService:
                         expected_payout_per_1=float(expected),
                     )
                 )
+            else:
+                if self.verbose:
+                    print(f"      [NO VALUE] ${expected:.4f} <= ${self.MIN_EXPECTED_PAYOUT_PER_1:.4f}")
 
+        if self.verbose:
+            print(f"\n    [TOTALS EVAL] Total value bets found: {len(value_bets)}")
         return sorted(value_bets, key=lambda vb: (vb.expected_payout_per_1 - 1.0), reverse=True)
 
 
