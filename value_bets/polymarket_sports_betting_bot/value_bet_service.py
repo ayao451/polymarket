@@ -22,7 +22,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional
 
-from pinnacle_scraper.sportsbook_odds import SportsbookOdds, HandicapOdds, TotalOdds
+from pinnacle_scraper.sportsbook_odds import SportsbookOdds, HandicapOdds, TotalOdds, PlayerPropOdds
 from polymarket_odds_service.polymarket_odds import PolymarketOdds
 
 MarketOdds = PolymarketOdds.MarketOdds
@@ -877,6 +877,231 @@ class TotalsValueBetService:
 
         if self.verbose:
             print(f"\n    [TOTALS EVAL] Total value bets found: {len(value_bets)}")
+        return sorted(value_bets, key=lambda vb: (vb.expected_payout_per_1 - 1.0), reverse=True)
+
+
+@dataclass(frozen=True)
+class PlayerPropValueBet:
+    """Value bet for a player prop."""
+    player_name: str
+    prop_type: str  # "points", "rebounds", "assists", etc.
+    line: float  # The line (e.g., 25.5 for points)
+    side: str  # "Over" or "Under"
+    token_id: str
+    true_prob: float  # True probability from sportsbook (devigged)
+    polymarket_best_ask: float
+    expected_payout_per_1: float
+
+
+class PlayerPropValueBetService:
+    """
+    Value bet discovery for player prop markets.
+    
+    Matching rule:
+      Polymarket (player, prop_type, line, Over/Under) must match sportsbook (player, prop_type, line, Over/Under).
+    """
+    
+    MIN_TRUE_PROB = ValueBetService.MIN_TRUE_PROB
+    MIN_EXPECTED_PAYOUT_PER_1 = ValueBetService.MIN_EXPECTED_PAYOUT_PER_1
+    
+    def __init__(
+        self,
+        *,
+        sportsbook_player_props: List[PlayerPropOdds],
+        polymarket_player_prop_results: List[MarketOdds],
+        polymarket_player_name: str,
+        polymarket_prop_type: str,
+        polymarket_line: float,
+        verbose: bool = False,
+    ) -> None:
+        self.sportsbook_player_props = sportsbook_player_props or []
+        self.polymarket_player_prop_results = polymarket_player_prop_results or []
+        self.polymarket_player_name = polymarket_player_name
+        self.polymarket_prop_type = polymarket_prop_type
+        self.polymarket_line = polymarket_line
+        self.verbose = verbose
+    
+    @staticmethod
+    def _normalize_name(name: str) -> str:
+        """Normalize player name for matching."""
+        return " ".join(str(name or "").strip().lower().split())
+    
+    @staticmethod
+    def _normalize_prop_type(prop_type: str) -> str:
+        """Normalize prop type for matching."""
+        return str(prop_type or "").strip().lower()
+    
+    @staticmethod
+    def _pt_key(pt: float) -> float:
+        """Round line to 2 decimals for matching."""
+        return round(float(pt), 2)
+    
+    @staticmethod
+    def _side_key(side: str) -> str:
+        """Normalize side (Over/Under) for matching."""
+        return (side or "").strip().lower()
+    
+    def _player_name_matches(self, sportsbook_name: str, polymarket_name: str) -> bool:
+        """Check if player names match (fuzzy matching)."""
+        sb_norm = self._normalize_name(sportsbook_name)
+        pm_norm = self._normalize_name(polymarket_name)
+        
+        if not sb_norm or not pm_norm:
+            return False
+        
+        if sb_norm == pm_norm:
+            return True
+        
+        # Check if one contains the other (handles "LeBron James" vs "lebron james")
+        if sb_norm in pm_norm or pm_norm in sb_norm:
+            return True
+        
+        # Check if last names match (handles "LeBron James" vs "James")
+        sb_words = sb_norm.split()
+        pm_words = pm_norm.split()
+        if sb_words and pm_words:
+            if sb_words[-1] == pm_words[-1]:
+                return True
+            # Check if first and last match (handles "LeBron James" vs "lebron james")
+            if len(sb_words) >= 2 and len(pm_words) >= 2:
+                if sb_words[0] == pm_words[0] and sb_words[-1] == pm_words[-1]:
+                    return True
+        
+        return False
+    
+    def _build_true_prob_map(self) -> dict[tuple[str, str, float, str], float]:
+        """Build a map of (player_name, prop_type, line, side) -> true_prob."""
+        out: dict[tuple[str, str, float, str], float] = {}
+        for prop in self.sportsbook_player_props:
+            devigged = ValueBetService._devig(
+                prop.outcome_1_cost_to_win_1,
+                prop.outcome_2_cost_to_win_1
+            )
+            if devigged is None:
+                continue
+            p_over, p_under = devigged
+            player_norm = self._normalize_name(prop.player_name)
+            prop_norm = self._normalize_prop_type(prop.prop_type)
+            key_pt = self._pt_key(prop.line)
+            out[(player_norm, prop_norm, key_pt, self._side_key("Over"))] = float(p_over)
+            out[(player_norm, prop_norm, key_pt, self._side_key("Under"))] = float(p_under)
+        return out
+    
+    def discover_value_bets(self) -> List[PlayerPropValueBet]:
+        """Discover value bets by matching Polymarket player props with sportsbook odds."""
+        if self.verbose:
+            print(f"\n    [PLAYER PROP EVAL] Starting player prop value bet discovery")
+            print(f"    [PLAYER PROP EVAL] Polymarket: {self.polymarket_player_name} {self.polymarket_prop_type} {self.polymarket_line}")
+            print(f"    [PLAYER PROP EVAL] Sportsbook props: {len(self.sportsbook_player_props)}")
+            for i, prop in enumerate(self.sportsbook_player_props[:5], 1):
+                devigged = ValueBetService._devig(prop.outcome_1_cost_to_win_1, prop.outcome_2_cost_to_win_1)
+                if devigged:
+                    print(f"      Prop {i}: {prop.player_name} {prop.prop_type} {prop.line} | Over @ ${prop.outcome_1_cost_to_win_1:.3f} -> {devigged[0]*100:.2f}% | Under @ ${prop.outcome_2_cost_to_win_1:.3f} -> {devigged[1]*100:.2f}%")
+            print(f"    [PLAYER PROP EVAL] Polymarket outcomes: {len(self.polymarket_player_prop_results)}")
+            for m in self.polymarket_player_prop_results:
+                print(f"      -> {m.market}: ask={m.best_ask}")
+        
+        true_prob_map = self._build_true_prob_map()
+        if self.verbose:
+            print(f"    [PLAYER PROP EVAL] True prob map size: {len(true_prob_map)}")
+        
+        value_bets: List[PlayerPropValueBet] = []
+        pm_player_norm = self._normalize_name(self.polymarket_player_name)
+        pm_prop_norm = self._normalize_prop_type(self.polymarket_prop_type)
+        pm_line_key = self._pt_key(self.polymarket_line)
+        
+        for m in self.polymarket_player_prop_results:
+            if self.verbose:
+                print(f"\n    [PLAYER PROP EVAL] Processing: {m.market}")
+            if m.best_ask is None:
+                if self.verbose:
+                    print(f"      [SKIP] No best_ask")
+                continue
+            
+            # Extract side from market label (should be "Over" or "Under")
+            outcome = m.market.strip()
+            side = None
+            outcome_lower = outcome.lower()
+            if "over" in outcome_lower or outcome.startswith("O"):
+                side = "Over"
+            elif "under" in outcome_lower or outcome.startswith("U"):
+                side = "Under"
+            
+            if side is None:
+                if self.verbose:
+                    print(f"      [SKIP] Could not determine side from '{outcome}'")
+                continue
+            
+            # Try to match with sportsbook props
+            # We need to find a sportsbook prop that matches player, prop_type, and line
+            p_true = None
+            matched_player = None
+            matched_prop_type = None
+            
+            # Try exact match first
+            key = (pm_player_norm, pm_prop_norm, pm_line_key, self._side_key(side))
+            p_true = true_prob_map.get(key)
+            
+            # If no exact match, try fuzzy player name matching
+            if p_true is None:
+                for (sb_player, sb_prop, sb_line, sb_side), prob in true_prob_map.items():
+                    if (sb_prop == pm_prop_norm and 
+                        sb_line == pm_line_key and 
+                        sb_side == self._side_key(side) and
+                        self._player_name_matches(sb_player, pm_player_norm)):
+                        p_true = prob
+                        matched_player = sb_player
+                        matched_prop_type = sb_prop
+                        break
+            
+            if p_true is None:
+                if self.verbose:
+                    print(f"      [SKIP] No matching sportsbook prop found")
+                continue
+            
+            if self.verbose:
+                print(f"      Matched! True prob: {p_true*100:.2f}%")
+            
+            if float(p_true) < self.MIN_TRUE_PROB:
+                if self.verbose:
+                    print(f"      [SKIP] True prob {p_true*100:.2f}% below min {self.MIN_TRUE_PROB*100:.2f}%")
+                continue
+            
+            ask = float(m.best_ask)
+            if ask <= 0:
+                if self.verbose:
+                    print(f"      [SKIP] Invalid ask: {ask}")
+                continue
+            
+            payout_per_1 = 1.0 / ask
+            expected = float(p_true) * payout_per_1
+            if self.verbose:
+                print(f"      Polymarket ask: ${ask:.4f} ({ask*100:.2f}%)")
+                print(f"      Payout per $1 if win: ${payout_per_1:.4f}")
+                print(f"      Expected payout: {p_true:.4f} * {payout_per_1:.4f} = ${expected:.4f}")
+                print(f"      Edge: {(expected-1)*100:.2f}% (threshold: >{(self.MIN_EXPECTED_PAYOUT_PER_1-1)*100:.2f}%)")
+            
+            if expected > self.MIN_EXPECTED_PAYOUT_PER_1:
+                if self.verbose:
+                    print(f"      [VALUE BET!] ${expected:.4f} > ${self.MIN_EXPECTED_PAYOUT_PER_1:.4f}")
+                value_bets.append(
+                    PlayerPropValueBet(
+                        player_name=self.polymarket_player_name,
+                        prop_type=self.polymarket_prop_type,
+                        line=float(self.polymarket_line),
+                        side=side,
+                        token_id=str(m.token_id),
+                        true_prob=float(p_true),
+                        polymarket_best_ask=float(ask),
+                        expected_payout_per_1=float(expected),
+                    )
+                )
+            else:
+                if self.verbose:
+                    print(f"      [NO VALUE] ${expected:.4f} <= ${self.MIN_EXPECTED_PAYOUT_PER_1:.4f}")
+        
+        if self.verbose:
+            print(f"\n    [PLAYER PROP EVAL] Total value bets found: {len(value_bets)}")
         return sorted(value_bets, key=lambda vb: (vb.expected_payout_per_1 - 1.0), reverse=True)
 
 

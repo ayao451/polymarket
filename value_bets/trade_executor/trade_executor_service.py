@@ -15,6 +15,7 @@ Credentials are read from `config_local.py` (optional) or env vars:
 from __future__ import annotations
 
 import csv
+import traceback
 from dataclasses import dataclass
 import os
 from datetime import datetime, timezone
@@ -32,13 +33,29 @@ class TradeExecutionResult:
     token_id: str
     side: str
     price: float
-    size: float
+    size: float  # Requested size
     order_type: OrderType
     team: Optional[str] = None
     game: Optional[str] = None
     expected_payout_per_1: Optional[float] = None
     response: Optional[Any] = None
     error: Optional[str] = None
+    filled_size: Optional[float] = None  # Actual filled size (for partial fills)
+    event_slug: Optional[str] = None  # Polymarket event slug
+    
+    @property
+    def is_partial_fill(self) -> bool:
+        """Returns True if this was a partial fill (filled less than requested)."""
+        if self.filled_size is None:
+            return False
+        return self.filled_size < self.size
+    
+    @property
+    def fill_percentage(self) -> float:
+        """Returns the percentage of the order that was filled."""
+        if self.filled_size is None or self.size <= 0:
+            return 100.0  # Assume full fill if unknown
+        return (self.filled_size / self.size) * 100
 
 
 class TradeExecutorService:
@@ -67,7 +84,6 @@ class TradeExecutorService:
             return float(balance)
         except Exception as e:
             print(f"Error fetching USDC balance: {e}")
-            import traceback
             traceback.print_exc()
             return None
 
@@ -82,6 +98,7 @@ class TradeExecutorService:
         team: Optional[str] = None,
         game: Optional[str] = None,
         expected_payout_per_1: Optional[float] = None,
+        event_slug: Optional[str] = None,
         error: str,
     ) -> TradeExecutionResult:
         return TradeExecutionResult(
@@ -96,6 +113,7 @@ class TradeExecutorService:
             expected_payout_per_1=expected_payout_per_1,
             response=None,
             error=error,
+            event_slug=event_slug,
         )
 
     @staticmethod
@@ -130,9 +148,13 @@ class TradeExecutorService:
                 tx_hashes = resp.get("transactionsHashes") or resp.get("transactionHashes")
                 success = resp.get("success")
 
-            # Human-readable financials (approx; ignores fees)
-            amount = float(result.price) * float(result.size)  # USDC spent for BUY
-            payout = float(result.size)  # $1 per token if outcome wins
+            # Use filled_size if available, otherwise fall back to requested size
+            actual_size = result.filled_size if result.filled_size is not None else result.size
+            requested_size = result.size
+
+            # Human-readable financials based on ACTUAL filled amount (approx; ignores fees)
+            amount = float(result.price) * float(actual_size)  # USDC actually spent for BUY
+            payout = float(actual_size)  # $1 per token if outcome wins
             profit = payout - amount
 
             team = (result.team or "").strip() or "UNKNOWN_TEAM"
@@ -155,7 +177,9 @@ class TradeExecutorService:
                 "profit": f"{profit:.2f}",
                 "side": str(result.side),
                 "price": f"{float(result.price):.4f}",
-                "size": str(result.size),
+                "size_requested": str(requested_size),
+                "size_filled": str(actual_size),
+                "fill_pct": f"{result.fill_percentage:.1f}",
                 "type": str(order_type),
                 "expected_payout_per_$1": (
                     f"{float(result.expected_payout_per_1):.4f}"
@@ -167,6 +191,7 @@ class TradeExecutorService:
                 "order_id": ("" if order_id is None else str(order_id)),
                 "tx_hashes": tx_hashes_s,
                 "token_id": str(result.token_id),
+                "event_slug": ("" if result.event_slug is None else str(result.event_slug)),
             }
 
             path = cls._trades_csv_path()
@@ -192,6 +217,7 @@ class TradeExecutorService:
         team: Optional[str] = None,
         game: Optional[str] = None,
         expected_payout_per_1: Optional[float] = None,
+        event_slug: Optional[str] = None,
     ) -> TradeExecutionResult:
         """
         Execute an order on Polymarket CLOB.
@@ -208,6 +234,7 @@ class TradeExecutorService:
                 team=team,
                 game=game,
                 expected_payout_per_1=expected_payout_per_1,
+                event_slug=event_slug,
                 error=self._init_error or "Trade executor not initialized",
             )
 
@@ -221,6 +248,7 @@ class TradeExecutorService:
                 team=team,
                 game=game,
                 expected_payout_per_1=expected_payout_per_1,
+                event_slug=event_slug,
                 error=f"Invalid side '{side}'. Expected BUY or SELL.",
             )
         if not token_id:
@@ -233,6 +261,7 @@ class TradeExecutorService:
                 team=team,
                 game=game,
                 expected_payout_per_1=expected_payout_per_1,
+                event_slug=event_slug,
                 error="token_id is required",
             )
         if price <= 0:
@@ -245,6 +274,7 @@ class TradeExecutorService:
                 team=team,
                 game=game,
                 expected_payout_per_1=expected_payout_per_1,
+                event_slug=event_slug,
                 error="price must be > 0",
             )
         if size <= 0:
@@ -257,6 +287,7 @@ class TradeExecutorService:
                 team=team,
                 game=game,
                 expected_payout_per_1=expected_payout_per_1,
+                event_slug=event_slug,
                 error="size must be > 0",
             )
 
@@ -268,6 +299,22 @@ class TradeExecutorService:
                 token_id=token_id,
                 order_type=order_type,
             )
+            
+            # Extract filled size from response (for FAK partial fills)
+            filled_size: Optional[float] = None
+            if isinstance(resp, dict):
+                # Try various field names Polymarket might use
+                matched = resp.get("matchedAmount") or resp.get("matched_amount") or resp.get("filledAmount")
+                if matched is not None:
+                    try:
+                        filled_size = float(matched)
+                    except (ValueError, TypeError):
+                        filled_size = None
+                
+                # If no explicit matched amount but status is "matched", assume full fill
+                if filled_size is None and resp.get("status") == "matched":
+                    filled_size = size
+            
             result = TradeExecutionResult(
                 ok=True,
                 token_id=token_id,
@@ -280,6 +327,8 @@ class TradeExecutorService:
                 expected_payout_per_1=expected_payout_per_1,
                 response=resp,
                 error=None,
+                filled_size=filled_size,
+                event_slug=event_slug,
             )
             self._append_successful_trade(result)
             return result
@@ -293,6 +342,7 @@ class TradeExecutorService:
                 team=team,
                 game=game,
                 expected_payout_per_1=expected_payout_per_1,
+                event_slug=event_slug,
                 error=f"{e} ({type(e).__name__})",
             )
 

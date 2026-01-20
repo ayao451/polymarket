@@ -71,3 +71,64 @@ class TotalOdds(SportsbookOdds):
             f"Over: {format(self.outcome_1_cost_to_win_1, fmt)} to win $1 | "
             f"Under: {format(self.outcome_2_cost_to_win_1, fmt)} to win $1"
         )
+
+
+@dataclass(frozen=True)
+class PlayerPropOdds:
+    """
+    Player prop odds.
+    
+    player_name: Name of the player
+    prop_type: Type of prop (e.g., "points", "rebounds", "assists")
+    line: The line (e.g., 25.5 for points)
+    outcome_1 = "Over", outcome_2 = "Under"
+    outcome_1_cost_to_win_1: Cost to win $1 for Over
+    outcome_2_cost_to_win_1: Cost to win $1 for Under
+    """
+    player_name: str
+    prop_type: str
+    line: float
+    outcome_1: str  # "Over"
+    outcome_2: str  # "Under"
+    outcome_1_cost_to_win_1: float
+    outcome_2_cost_to_win_1: float
+    
+    def to_string(self, decimals: int = 6) -> str:
+        decimals = max(0, int(decimals))
+        fmt = f".{decimals}f"
+        return (
+            f"{self.player_name} {self.prop_type} {self.line} | "
+            f"Over: {format(self.outcome_1_cost_to_win_1, fmt)} to win $1 | "
+            f"Under: {format(self.outcome_2_cost_to_win_1, fmt)} to win $1"
+        )
+    
+    def __str__(self) -> str:
+        return self.to_string()
+
+
+@dataclass(frozen=True)
+class ThreeWayMoneylineOdds:
+    """
+    3-way moneyline odds for soccer (away win, draw, home win).
+    
+    outcome_1 = away_team
+    outcome_2 = "Draw"
+    outcome_3 = home_team
+    """
+    away_team: str
+    home_team: str
+    outcome_1_cost_to_win_1: float  # away team
+    outcome_2_cost_to_win_1: float  # draw
+    outcome_3_cost_to_win_1: float  # home team
+    
+    def to_string(self, decimals: int = 6) -> str:
+        decimals = max(0, int(decimals))
+        fmt = f".{decimals}f"
+        return (
+            f"{self.away_team}: {format(self.outcome_1_cost_to_win_1, fmt)} to win $1 | "
+            f"Draw: {format(self.outcome_2_cost_to_win_1, fmt)} to win $1 | "
+            f"{self.home_team}: {format(self.outcome_3_cost_to_win_1, fmt)} to win $1"
+        )
+    
+    def __str__(self) -> str:
+        return self.to_string()

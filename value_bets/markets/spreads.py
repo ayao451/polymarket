@@ -20,6 +20,7 @@ from polymarket_odds_service.polymarket_odds import PolymarketOdds
 
 MarketOdds = PolymarketOdds.MarketOdds
 from polymarket_sports_betting_bot.value_bet_service import SpreadValueBetService, SpreadValueBet
+from value_bet_helpers import log_attempted_spread_bet, log_value_bet
 
 from .market import Market
 
@@ -150,12 +151,44 @@ class Spreads(Market):
         print(f"  Expected payout per $1: ${value_bet.expected_payout_per_1:.4f}")
         print(f"  Token ID: {value_bet.token_id}")
         
+        # Log to value_bets.csv
+        try:
+            log_value_bet(
+                value_bet=value_bet,
+                away_team=away_team,
+                home_team=home_team,
+                play_date=play_date,
+                event_slug=event_slug,
+                market_slug=market_slug,
+            )
+        except Exception as e:
+            print(f"[WARNING] Failed to log value bet: {e}")
+        
         # Step 4: Calculate Kelly bet size and execute trade
         if self.verbose:
             print(f"\n[STEP 4/4] Executing trade with Kelly Criterion sizing...")
-        self.execute_value_bet(value_bet, away_team, home_team)
+        trade_result = self.execute_value_bet(value_bet, away_team, home_team, event_slug)
         
-        return value_bet
+        # Log attempted value bet (regardless of execution result)
+        try:
+            executed = trade_result is not None and trade_result.ok
+            error = None if executed else (trade_result.error if trade_result else "Trade skipped")
+            log_attempted_spread_bet(
+                value_bet=value_bet,
+                away_team=away_team,
+                home_team=home_team,
+                event_slug=event_slug,
+                market_slug=market_slug,
+                executed=executed,
+                error=error,
+            )
+        except Exception as e:
+            print(f"[WARNING] Failed to log attempted value bet: {e}")
+        
+        # Only return value bet if trade succeeded
+        if trade_result is not None and trade_result.ok:
+            return value_bet
+        return None
 
     def run_multiple(
         self,

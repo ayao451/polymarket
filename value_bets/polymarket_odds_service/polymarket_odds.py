@@ -1,8 +1,307 @@
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+from datetime import date, datetime
 import json
+import re
 import requests
 from py_clob_client.client import ClobClient
+
+
+class PolymarketGameFinder:
+    """
+    Finds sports game events on Polymarket (Gamma API).
+    
+    NOTE: This does not use `/public-search` because that endpoint can return 422s
+    for complex queries. We only use `/events` and filter client-side.
+    """
+
+    GAMMA_API_BASE = "https://gamma-api.polymarket.com"
+    GAME_BETS_TAG_ID = "100639"
+
+    def __init__(self) -> None:
+        self.session = requests.Session()
+
+    def fetch_events_page(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        active: bool = True,
+        closed: bool = False,
+        order: str = "startTime",
+        ascending: bool = False,
+        tag_id: str = GAME_BETS_TAG_ID,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch one page of events from Gamma's `/events` endpoint.
+        """
+        url = f"{self.GAMMA_API_BASE}/events"
+        params = {
+            "active": "true" if active else "false",
+            "closed": "true" if closed else "false",
+            "limit": str(int(limit)),
+            "offset": str(int(offset)),
+            "order": str(order),
+            "ascending": "true" if ascending else "false",
+            "tag_id": str(tag_id),
+        }
+
+        try:
+            response = self.session.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, list):
+                return data
+            return data.get("data", []) or []
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching events: {e}")
+            return []
+
+    @staticmethod
+    def _normalize(s: str) -> str:
+        # Assumes input is already stripped
+        return " ".join(str(s).lower().split())
+
+    @classmethod
+    def _team_tokens(cls, team: str) -> List[str]:
+        """
+        Tokens to match in Gamma event titles.
+        
+        Polymarket titles sometimes contain only the team nickname, so we match:
+        - last word, and
+        - other "meaningful" words (>3 chars)
+        """
+        words = [w for w in cls._normalize(team).split() if w]
+        if not words:
+            return []
+
+        last = words[-1]
+        meaningful = [w for w in words if len(w) > 3]
+
+        out: List[str] = []
+        for w in [last, *meaningful]:
+            if w not in out:
+                out.append(w)
+        return out
+
+    @staticmethod
+    def _parse_start_time(event: Dict[str, Any]) -> Optional[datetime]:
+        """
+        Best-effort parse of `startTime` / `startDate` to a datetime.
+        """
+        for key in ("startTime", "startDate"):
+            raw = event.get(key)
+            if not raw:
+                continue
+            try:
+                return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            except Exception:
+                continue
+        return None
+
+    def find_event_slug(
+        self,
+        *,
+        away_team: str,
+        home_team: str,
+        play_date: date,
+        limit: int = 100,
+        max_pages: int = 25,
+    ) -> Optional[str]:
+        """
+        Find the Gamma event slug for a matchup on a given local date.
+        """
+        # Strip inputs once when they first enter
+        away_team = away_team.strip() if away_team else ""
+        home_team = home_team.strip() if home_team else ""
+        away_tokens = self._team_tokens(away_team)
+        home_tokens = self._team_tokens(home_team)
+        if not away_tokens or not home_tokens:
+            return None
+
+        # Some future events appear as inactive until closer to game time.
+        # We try active-only first, then retry with active=false.
+        for active_only in (True, False):
+            for page in range(max(0, int(max_pages))):
+                events = self.fetch_events_page(
+                    limit=limit,
+                    offset=page * limit,
+                    active=active_only,
+                    closed=False,
+                    order="startTime",
+                    ascending=False,  # newest/upcoming first (better for tomorrow)
+                )
+                if not events:
+                    break
+
+                for event in events:
+                    title_raw = event.get("title") or ""
+                    if not title_raw:
+                        continue
+                    # Strip once when extracting from event
+                    title = self._normalize(str(title_raw).strip())
+                    if not title:
+                        continue
+
+                    if not any(t in title for t in away_tokens):
+                        continue
+                    if not any(t in title for t in home_tokens):
+                        continue
+
+                    start = self._parse_start_time(event)
+                    if start is not None and start.astimezone().date() != play_date:
+                        continue
+
+                    slug_raw = event.get("slug") or ""
+                    if not slug_raw:
+                        continue
+                    # Strip once when extracting from event
+                    slug = str(slug_raw).strip()
+                    if slug:
+                        return slug
+
+        return None
+
+
+class PolymarketMarketExtractor:
+    """Helper class for extracting market information from Polymarket events."""
+
+    @staticmethod
+    def spread_market_slugs_from_event(event: Dict) -> List[str]:
+        """
+        Given a Gamma event payload (from /events/slug/{event_slug}), return the list of
+        spread market slugs, e.g. "nba-phx-mia-2026-01-13-spread-home-1pt5".
+
+        Heuristics (to avoid missing spread markets):
+        - include if `question` contains "spread" (case-insensitive), OR
+        - include if `sportsMarketType` contains "spread", OR
+        - include if slug contains "-spread-"
+
+        Exclusions:
+        - exclude first half spreads (e.g. "1H Spread" / "first_half_spreads" / slug contains "-1h-")
+        """
+        if not isinstance(event, dict):
+            return []
+
+        out: List[str] = []
+        markets = event.get("markets", []) or []
+        for m in markets:
+            try:
+                if not isinstance(m, dict):
+                    continue
+                q = str(m.get("question") or "")
+                smt = str(m.get("sportsMarketType") or "")
+                slug_raw = m.get("slug") or ""
+                if not slug_raw:
+                    continue
+                # Strip once when extracting from event
+                slug = str(slug_raw).strip()
+
+                # Exclude 1H / first half spread markets; we only want full game spreads.
+                q_low = q.lower()
+                smt_low = smt.lower()
+                slug_low = slug.lower()
+                is_first_half = (
+                    q_low.startswith("1h ")
+                    or q_low.startswith("1hspread")
+                    or "1h spread" in q_low
+                    or "first half" in q_low
+                    or "first_half" in smt_low
+                    or "first half" in smt_low
+                    or "-1h-" in slug_low
+                    or slug_low.startswith("1h-")
+                )
+                if is_first_half:
+                    continue
+
+                is_spread = (
+                    ("spread" in q_low)
+                    or ("spread" in smt_low)
+                    or ("-spread-" in slug_low)
+                )
+                if not is_spread:
+                    continue
+                if slug:
+                    out.append(slug)
+            except Exception:
+                continue
+
+        # De-dup while keeping order
+        seen = set()
+        deduped: List[str] = []
+        for s in out:
+            if s in seen:
+                continue
+            seen.add(s)
+            deduped.append(s)
+        return deduped
+
+    @staticmethod
+    def totals_market_slugs_from_event(event: Dict) -> List[str]:
+        """
+        Given a Gamma event payload, return totals market slugs.
+        
+        Simple rule: if the slug contains "total", it's a totals market.
+        """
+        if not isinstance(event, dict):
+            return []
+
+        out: List[str] = []
+        for m in event.get("markets", []) or []:
+            if not isinstance(m, dict):
+                continue
+            slug = str(m.get("slug") or "").strip()
+            if slug and "total" in slug.lower():
+                out.append(slug)
+
+        # De-dup while keeping order
+        return list(dict.fromkeys(out))
+
+    @staticmethod
+    def player_prop_market_slugs_from_event(event: Dict) -> List[str]:
+        """
+        Given a Gamma event payload, return player prop market slugs.
+        
+        Player prop slugs typically contain:
+        - A prop type: "points", "rebounds", "assists", "threes", "steals", "blocks"
+        - A player name (hyphenated)
+        - A line (e.g., "26pt5" for 26.5)
+        
+        Format: {event_slug}-{prop_type}-{player-name}-{line}
+        Example: "nba-lal-por-2026-01-17-points-lebron-james-26pt5"
+        """
+        if not isinstance(event, dict):
+            return []
+
+        out: List[str] = []
+        prop_types = ["points", "rebounds", "assists", "threes", "steals", "blocks"]
+        
+        for m in event.get("markets", []) or []:
+            if not isinstance(m, dict):
+                continue
+            slug = str(m.get("slug") or "").strip().lower()
+            if not slug:
+                continue
+            
+            # Check if slug contains a prop type followed by what looks like a player name
+            # Pattern: ...-{prop_type}-{player-name}-{line}
+            for prop_type in prop_types:
+                pattern = f"-{prop_type}-"
+                if pattern in slug:
+                    # Make sure it's not a team total or something else
+                    # Player props should have the prop type, then player name, then line
+                    parts = slug.split(pattern)
+                    if len(parts) == 2:
+                        # Check if the part after prop_type looks like a player prop (has a line at the end)
+                        after_prop = parts[1]
+                        # Should end with something like "26pt5" or similar
+                        if re.search(r'\d+pt\d+$', after_prop) or re.search(r'-\d+\.?\d*$', after_prop):
+                            # This looks like a player prop
+                            out.append(str(m.get("slug") or "").strip())
+                            break
+
+        # De-dup while keeping order
+        return list(dict.fromkeys(out))
 
 
 class PolymarketOdds:
@@ -20,10 +319,30 @@ class PolymarketOdds:
     def __init__(self):
         self.GAMMA_API_BASE = "https://gamma-api.polymarket.com"
         self.CLOB_API_BASE = "https://clob.polymarket.com"
+        self.session = requests.Session()
         self.clob_client = ClobClient(
             host=self.CLOB_API_BASE,
             chain_id=137  # Polygon mainnet
         )
+
+    def fetch_event_by_slug(self, slug: str) -> Optional[Dict]:
+        """
+        Fetch a specific event by slug from Polymarket's Gamma API.
+        
+        Args:
+            slug: The event slug to fetch
+            
+        Returns:
+            Event dictionary or None if error
+        """
+        url = f"{self.GAMMA_API_BASE}/events/slug/{slug}"
+        
+        try:
+            response = self.session.get(url)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException:
+            return None
 
     def retrieve_polymarket_odds(self, event_slug: str, market_slug: str) -> List[MarketOdds]:
         """
@@ -38,7 +357,7 @@ class PolymarketOdds:
         """
         # Step 1: Fetch the event using the gamma API
         event_url = f"{self.GAMMA_API_BASE}/events/slug/{event_slug}"
-        response = requests.get(event_url)
+        response = self.session.get(event_url)
         response.raise_for_status()
         event_data = response.json()
         

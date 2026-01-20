@@ -143,6 +143,7 @@ class Market(ABC):
         value_bet: AnyValueBet,
         away_team: str,
         home_team: str,
+        event_slug: str,
     ) -> Optional[TradeExecutionResult]:
         """
         Execute a value bet using Kelly Criterion sizing.
@@ -193,12 +194,19 @@ class Market(ABC):
         self.print_kelly_info(bet_size, full_kelly, bankroll, num_tokens)
         
         # Get team/label for logging
+        # Use isinstance checks to determine type
         if isinstance(value_bet, (ValueBet, SpreadValueBet)):
             team = value_bet.team
         elif isinstance(value_bet, TotalsValueBet):
             team = value_bet.side
         else:
-            team = "Unknown"
+            # For PlayerPropValueBetWrapper or other custom types, try direct access
+            try:
+                team = value_bet.team
+                if not team:
+                    team = "Unknown"
+            except AttributeError:
+                team = "Unknown"
         
         # Always print that we're attempting to execute
         print(f"\n  [EXECUTING TRADE]")
@@ -215,22 +223,35 @@ class Market(ABC):
             side=BUY,
             price=price,
             size=num_tokens,
-            order_type=OrderType.FOK,
+            order_type=OrderType.FAK,  # Fill and Kill - partial fills allowed
             team=team,
             game=f"{away_team} @ {home_team}",
             expected_payout_per_1=value_bet.expected_payout_per_1,
+            event_slug=event_slug,
         )
         
         # Always print trade result
         if result.ok:
             print(f"\n{'*'*60}")
-            print(f"*** TRADE EXECUTED SUCCESSFULLY ***")
+            if result.is_partial_fill:
+                print(f"*** TRADE PARTIALLY FILLED ***")
+            else:
+                print(f"*** TRADE EXECUTED SUCCESSFULLY ***")
             print(f"{'*'*60}")
             print(f"  Game: {away_team} @ {home_team}")
             print(f"  Team/Outcome: {team}")
             print(f"  Price: {price:.4f}")
-            print(f"  Size (tokens): {num_tokens:.2f}")
-            print(f"  Cost (USDC): ${num_tokens * price:.2f}")
+            
+            # Show requested vs filled for partial fills
+            actual_size = result.filled_size if result.filled_size is not None else num_tokens
+            if result.is_partial_fill:
+                print(f"  Size requested: {num_tokens:.2f} tokens")
+                print(f"  Size filled: {actual_size:.2f} tokens ({result.fill_percentage:.1f}%)")
+                print(f"  Cost (USDC): ${actual_size * price:.2f} (of ${num_tokens * price:.2f} requested)")
+            else:
+                print(f"  Size (tokens): {actual_size:.2f}")
+                print(f"  Cost (USDC): ${actual_size * price:.2f}")
+            
             print(f"  Expected payout per $1: ${value_bet.expected_payout_per_1:.4f}")
             print(f"  Order ID: {result.response.get('orderID') if result.response else 'N/A'}")
             if self.verbose and result.response:

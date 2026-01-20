@@ -40,6 +40,10 @@ DEFAULT_HOCKEY_MATCHUPS_URL = "https://www.pinnacle.com/en/hockey/matchups/"
 ARCADIA_HOCKEY_MATCHUPS_URL = (
     "https://guest.api.arcadia.pinnacle.com/0.1/sports/19/matchups?withSpecials=false&brandId=0"
 )
+DEFAULT_SOCCER_MATCHUPS_URL = "https://www.pinnacle.com/en/soccer/matchups/"
+ARCADIA_SOCCER_MATCHUPS_URL = (
+    "https://guest.api.arcadia.pinnacle.com/0.1/sports/29/matchups?withSpecials=false&brandId=0"
+)
 
 
 def _now_ms() -> int:
@@ -269,6 +273,36 @@ def _list_hockey_matchups_for_local_date(
     falls on the given local_date (system local timezone).
     """
     payload = _arcadia_get_json_requests(ARCADIA_HOCKEY_MATCHUPS_URL, timeout_s=timeout_s)
+    if not isinstance(payload, list):
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for m in payload:
+        if not isinstance(m, dict):
+            continue
+        st = _parse_iso_dt(m.get("startTime"))
+        if st is None:
+            continue
+        try:
+            st_local = st.astimezone()  # system local tz
+        except Exception:
+            st_local = st
+        if st_local.date() != local_date:
+            continue
+        out.append(m)
+    return out
+
+
+def _list_soccer_matchups_for_local_date(
+    *,
+    local_date,
+    timeout_s: float = 20.0,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch the Arcadia soccer matchups feed and filter to matchups whose startTime
+    falls on the given local_date (system local timezone).
+    """
+    payload = _arcadia_get_json_requests(ARCADIA_SOCCER_MATCHUPS_URL, timeout_s=timeout_s)
     if not isinstance(payload, list):
         return []
 
@@ -988,7 +1022,23 @@ def _try_extract_market_rows(payload: Any, *, away: str, home: str) -> List[Odds
         if "spread" in mt_s:
             return "spread"
         if "total" in mt_s or "totals" in mt_s or "over" in mt_s or "under" in mt_s:
+            # Check if it's a player prop total (has player name) vs game total
+            # For now, we'll check if the market has player-related fields
+            # Player props typically have player names in the selection or market name
+            has_player = False
+            name_str = str(d.get("name") or d.get("marketName") or "").lower()
+            # Common player prop indicators
+            if any(indicator in name_str for indicator in ["player", "points", "rebounds", "assists", "threes", "steals", "blocks"]):
+                # Check if it's not a team total (team totals usually say "team total")
+                if "team total" not in name_str and "team points" not in name_str:
+                    has_player = True
+            if has_player:
+                return "player_prop"
             return "totals"
+        # Check for player prop indicators in market name/type
+        if any(indicator in mt_s for indicator in ["player", "points", "rebounds", "assists", "threes", "steals", "blocks"]):
+            if "team" not in mt_s:
+                return "player_prop"
         return None
 
     def iter_selection_like(n: Any) -> Iterable[Dict[str, Any]]:
@@ -1100,6 +1150,33 @@ def _try_extract_market_rows(payload: Any, *, away: str, home: str) -> List[Odds
                         away_team=away_n,
                         home_team=home_n,
                         market_type="totals",
+                        selection=name,
+                        line=float(final_line),
+                        odds=odds,
+                        raw={"market": d, "selection": sel},
+                    )
+                )
+            elif mt == "player_prop":
+                # Player props: selection is usually "Over" or "Under", but may include player name
+                # The player name and prop type are typically in the market name/description
+                if not name:
+                    continue
+                nkey = _norm_key(name)
+                # Normalize to Over/Under
+                if "over" in nkey:
+                    name = "Over"
+                elif "under" in nkey:
+                    name = "Under"
+                if name not in ("Over", "Under"):
+                    continue
+                if final_line is None:
+                    continue
+                # Store the full market info in raw for later extraction
+                rows.append(
+                    OddsRow(
+                        away_team=away_n,
+                        home_team=home_n,
+                        market_type="player_prop",
                         selection=name,
                         line=float(final_line),
                         odds=odds,
@@ -1263,11 +1340,17 @@ def _scrape_via_api_interception(page: Page, *, url: str, timeout_ms: int) -> Tu
                                 keep[k] = (s[:4] + "…") if len(s) > 6 else "…"
                             else:
                                 keep[k] = vv
+                # Get resource_type with try/except instead of hasattr
+                resource_type_str = ""
+                try:
+                    resource_type_str = str(req.resource_type)
+                except AttributeError:
+                    resource_type_str = ""
                 debug_pinnacle_requests.append(
                     {
                         "url": r_url,
                         "method": req.method,
-                        "resource_type": str(req.resource_type if hasattr(req, "resource_type") else ""),
+                        "resource_type": resource_type_str,
                         "headers_subset": keep,
                     }
                 )
@@ -1299,11 +1382,17 @@ def _scrape_via_api_interception(page: Page, *, url: str, timeout_ms: int) -> Tu
                     err_text = str(failure or "")
             except Exception:
                 err_text = ""
+            # Get resource_type with try/except instead of getattr
+            resource_type_str = ""
+            try:
+                resource_type_str = str(req.resource_type)
+            except AttributeError:
+                resource_type_str = ""
             debug_request_failures.append(
                 {
                     "url": r_url,
                     "method": req.method,
-                    "resource_type": str(getattr(req, "resource_type", "") or ""),
+                    "resource_type": resource_type_str,
                     "error": err_text,
                 }
             )
@@ -1318,8 +1407,8 @@ def _scrape_via_api_interception(page: Page, *, url: str, timeout_ms: int) -> Tu
             headers = resp.headers or {}
             rtype = ""
             try:
-                rtype = str(req.resource_type if hasattr(req, "resource_type") else "")
-            except Exception:
+                rtype = str(req.resource_type)
+            except AttributeError:
                 rtype = ""
 
             # Track a small sample of XHR/fetch traffic for debugging (without dumping bodies).

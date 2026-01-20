@@ -7,6 +7,8 @@ Refactored to fetch all events and markets upfront, then iterate through matched
 
 import sys
 import time
+import argparse
+import traceback
 from datetime import datetime, timedelta, timezone
 import os
 import csv
@@ -61,19 +63,49 @@ _match_games = match_games
 
 
 def main() -> int:
-    import argparse
     parser = argparse.ArgumentParser(description="Polymarket Sports Betting Bot")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument("--moneyline", action="store_true", help="Run moneyline markets")
+    parser.add_argument("--spreads", action="store_true", help="Run spread markets")
+    parser.add_argument("--totals", action="store_true", help="Run totals markets")
+    parser.add_argument("--players", action="store_true", help="Run player props markets")
     args = parser.parse_args()
     
     VERBOSE = args.verbose
-    MAX_RUNTIME_SECONDS = 8 * 60 * 60  # 8 hours
+
+    
+    # Determine which markets to run
+    # If no flags specified, run all markets
+    run_moneyline = args.moneyline
+    run_spreads = args.spreads
+    run_totals = args.totals
+    run_players = args.players
+    
+    # If no flags provided, run all markets
+    if not (run_moneyline or run_spreads or run_totals or run_players):
+        run_moneyline = True
+        run_spreads = True
+        run_totals = True
+        run_players = True
+    
+    markets_to_run = {
+        'moneyline': run_moneyline,
+        'spreads': run_spreads,
+        'totals': run_totals,
+        'player_props': run_players,
+    }
+    MAX_RUNTIME_SECONDS = 24 * 60 * 60  # 24 hours
     
     print("\n" + "="*80)
     print("POLYMARKET SPORTS BETTING BOT - STARTING UP")
     print("="*80)
     print(f"Max runtime: {MAX_RUNTIME_SECONDS/3600:.0f} hours")
     print(f"Verbose mode: {'ON' if VERBOSE else 'OFF'}")
+    print(f"Markets to run:")
+    print(f"  - Moneyline: {'YES' if markets_to_run['moneyline'] else 'NO'}")
+    print(f"  - Spreads: {'YES' if markets_to_run['spreads'] else 'NO'}")
+    print(f"  - Totals: {'YES' if markets_to_run['totals'] else 'NO'}")
+    print(f"  - Player Props: {'YES' if markets_to_run['player_props'] else 'NO'}")
     
     if VERBOSE:
         print("\n[INIT] Creating bot interface...")
@@ -111,7 +143,7 @@ def main() -> int:
         print("\n[STEP 1] Fetching Polymarket events...")
     polymarket_events = fetch_polymarket_events_for_date(
         today,
-        whitelisted_prefixes=["nba", "ncaa"],
+        whitelisted_prefixes=["nba", "cbb"],
         verbose=VERBOSE,
     )
     if VERBOSE:
@@ -193,6 +225,10 @@ def main() -> int:
     iteration = 0
     trade_executor = TradeExecutorService()
     
+    # Track which (event_slug, market_slug) combinations have been traded
+    # to avoid trading the same market twice
+    traded_markets: Set[Tuple[str, str]] = set()
+    
     while (time.time() - start_time) < MAX_RUNTIME_SECONDS:
         iteration += 1
         elapsed = time.time() - start_time
@@ -207,7 +243,7 @@ def main() -> int:
             print(f"  Current bankroll: ${bankroll:.2f}")
             print(f"  Minimum required: ${MIN_BANKROLL:.2f}")
             print(f"  Exiting to protect remaining funds.")
-            return 1
+            
         
         if VERBOSE:
             print("\n" + "="*80)
@@ -246,7 +282,10 @@ def main() -> int:
                 continue
             
             if VERBOSE:
-                print(f"[OK] Found markets: moneyline={len(markets.get('moneyline', []))}, spreads={len(markets.get('spreads', []))}, totals={len(markets.get('totals', []))}")
+                print(f"[OK] Found markets: moneyline={len(markets.get('moneyline', []))}, "
+                      f"spreads={len(markets.get('spreads', []))}, "
+                      f"totals={len(markets.get('totals', []))}, "
+                      f"player_props={len(markets.get('player_props', []))}")
             
             # Process this game using the bot interface
             if VERBOSE:
@@ -260,13 +299,14 @@ def main() -> int:
                     play_date=today,
                     event_slug=event_slug,
                     market_slugs_by_event=market_slugs_by_event,
+                    traded_markets=traded_markets,
+                    markets_to_run=markets_to_run,
                 )
                 if VERBOSE:
                     print(f"[DONE] Finished processing: {away_team} @ {home_team}")
 
             except Exception as e:
                 print(f"[ERROR] Exception while processing {away_team} @ {home_team}: {e}")
-                import traceback
                 traceback.print_exc()
                 continue
         
@@ -286,4 +326,18 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        exit_code = main()
+        raise SystemExit(exit_code)
+    except KeyboardInterrupt:
+        print("\n[INTERRUPTED] Script interrupted by user. Exiting gracefully...")
+        raise SystemExit(0)
+    except Exception as e:
+        print(f"\n{'!'*60}")
+        print(f"!!! UNEXPECTED ERROR - LOGGING AND CONTINUING !!!")
+        print(f"{'!'*60}")
+        print(f"  Error: {e}")
+        traceback.print_exc()
+        print(f"\n  Continuing to allow logging...")
+        # Don't exit - let the script finish naturally
+        raise SystemExit(0)
