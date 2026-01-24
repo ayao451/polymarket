@@ -239,9 +239,9 @@ class PolymarketMarketExtractor:
     @staticmethod
     def totals_market_slugs_from_event(event: Dict) -> List[str]:
         """
-        Given a Gamma event payload, return totals market slugs.
-        
-        Simple rule: if the slug contains "total", it's a totals market.
+        Given a Gamma event payload, return generic totals market slugs (e.g. NBA O/U).
+        Excludes total-games, total-sets (tennis), match-total, set-totals, and spread.
+        Use totals_games / totals_sets for tennis.
         """
         if not isinstance(event, dict):
             return []
@@ -251,57 +251,64 @@ class PolymarketMarketExtractor:
             if not isinstance(m, dict):
                 continue
             slug = str(m.get("slug") or "").strip()
-            if slug and "total" in slug.lower():
-                out.append(slug)
-
-        # De-dup while keeping order
+            if not slug or "total" not in slug.lower():
+                continue
+            s = slug.lower()
+            if "games" in s or "sets" in s or "spread" in s or "match-total" in s or "set-totals" in s or "first-set" in s or "first_set" in s:
+                continue
+            out.append(slug)
         return list(dict.fromkeys(out))
 
     @staticmethod
-    def player_prop_market_slugs_from_event(event: Dict) -> List[str]:
+    def totals_games_market_slugs_from_event(event: Dict) -> List[str]:
         """
-        Given a Gamma event payload, return player prop market slugs.
-        
-        Player prop slugs typically contain:
-        - A prop type: "points", "rebounds", "assists", "threes", "steals", "blocks"
-        - A player name (hyphenated)
-        - A line (e.g., "26pt5" for 26.5)
-        
-        Format: {event_slug}-{prop_type}-{player-name}-{line}
-        Example: "nba-lal-por-2026-01-17-points-lebron-james-26pt5"
+        Return total-games market slugs (tennis over/under games).
+        Matches: "match-total-X" (Polymarket) or "total" + "games".
+        Excludes: sets, spread, first-set (first-set-total = first set games, not match total).
         """
         if not isinstance(event, dict):
             return []
 
         out: List[str] = []
-        prop_types = ["points", "rebounds", "assists", "threes", "steals", "blocks"]
-        
         for m in event.get("markets", []) or []:
             if not isinstance(m, dict):
                 continue
-            slug = str(m.get("slug") or "").strip().lower()
+            slug = str(m.get("slug") or "").strip()
             if not slug:
                 continue
-            
-            # Check if slug contains a prop type followed by what looks like a player name
-            # Pattern: ...-{prop_type}-{player-name}-{line}
-            for prop_type in prop_types:
-                pattern = f"-{prop_type}-"
-                if pattern in slug:
-                    # Make sure it's not a team total or something else
-                    # Player props should have the prop type, then player name, then line
-                    parts = slug.split(pattern)
-                    if len(parts) == 2:
-                        # Check if the part after prop_type looks like a player prop (has a line at the end)
-                        after_prop = parts[1]
-                        # Should end with something like "26pt5" or similar
-                        if re.search(r'\d+pt\d+$', after_prop) or re.search(r'-\d+\.?\d*$', after_prop):
-                            # This looks like a player prop
-                            out.append(str(m.get("slug") or "").strip())
-                            break
-
-        # De-dup while keeping order
+            s = slug.lower()
+            if "sets" in s or "spread" in s or "first-set" in s or "first_set" in s:
+                continue
+            if "set-totals" in s:
+                continue
+            if ("match" in s and "total" in s) or ("total" in s and "games" in s):
+                out.append(slug)
         return list(dict.fromkeys(out))
+
+    @staticmethod
+    def totals_sets_market_slugs_from_event(event: Dict) -> List[str]:
+        """
+        Return total-sets market slugs (tennis over/under sets).
+        Matches: "set-totals-X" (Polymarket) or "total" + "sets".
+        Excludes: games, spread.
+        """
+        if not isinstance(event, dict):
+            return []
+
+        out: List[str] = []
+        for m in event.get("markets", []) or []:
+            if not isinstance(m, dict):
+                continue
+            slug = str(m.get("slug") or "").strip()
+            if not slug:
+                continue
+            s = slug.lower()
+            if "games" in s or "spread" in s:
+                continue
+            if "set-totals" in s or ("total" in s and "sets" in s):
+                out.append(slug)
+        return list(dict.fromkeys(out))
+
 
 
 class PolymarketOdds:
@@ -315,6 +322,7 @@ class PolymarketOdds:
         best_ask: Optional[float]
         ask_volume: float
         spread: Optional[float]
+        condition_id: Optional[str] = None
         
     def __init__(self):
         self.GAMMA_API_BASE = "https://gamma-api.polymarket.com"
@@ -372,6 +380,13 @@ class PolymarketOdds:
         if target_market is None:
             raise ValueError(f"Market with slug '{market_slug}' not found in event '{event_slug}'")
         
+        # Extract condition_id from market data
+        condition_id = target_market.get("conditionId") or target_market.get("condition_id")
+        if condition_id:
+            condition_id = str(condition_id)
+        else:
+            condition_id = None
+        
         # Parse clobTokenIds - may be a JSON string or already a list
         clob_token_ids = target_market.get("clobTokenIds", [])
         if isinstance(clob_token_ids, str):
@@ -427,7 +442,8 @@ class PolymarketOdds:
                 bid_volume=bid_volume,
                 best_ask=best_ask,
                 ask_volume=ask_volume,
-                spread=spread
+                spread=spread,
+                condition_id=condition_id
             ))
 
         return odds

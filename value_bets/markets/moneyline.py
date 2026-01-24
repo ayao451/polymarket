@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import math
 from datetime import date
-from typing import Optional
+from typing import Optional, Set, Tuple
 
 from polymarket_sports_betting_bot.value_bet_service import ValueBetService, ValueBet
 from value_bet_helpers import log_attempted_moneyline_bet, log_value_bet
@@ -33,6 +33,7 @@ class Moneyline(Market):
         play_date: date,
         event_slug: str,
         market_slug: str,
+        traded_markets: Optional[Set[str]] = None,
     ) -> Optional[ValueBet]:
         """
         Run the full moneyline flow.
@@ -164,9 +165,26 @@ class Moneyline(Market):
                 home_norm = value_bet_service._normalize_team_name(home_team)
                 draw_norm = value_bet_service._normalize_team_name("draw")
                 
+                # Special handling for tennis: Polymarket may use "Person 1" / "Person 2"
+                # Map Person 1 -> away_team, Person 2 -> home_team
+                person_1_norm = value_bet_service._normalize_team_name("Person 1")
+                person_2_norm = value_bet_service._normalize_team_name("Person 2")
+                
                 if outcome_norm == draw_norm or "draw" in outcome_norm:
                     p_true = p_draw
                     team_label = "Draw"
+                elif outcome_norm == person_1_norm:
+                    # Person 1 maps to away_team (first player)
+                    p_true = p_away
+                    team_label = away_team
+                    if self.verbose:
+                        print(f"    [MATCH] Matched 'Person 1' to away team '{away_team}'")
+                elif outcome_norm == person_2_norm:
+                    # Person 2 maps to home_team (second player)
+                    p_true = p_home
+                    team_label = home_team
+                    if self.verbose:
+                        print(f"    [MATCH] Matched 'Person 2' to home team '{home_team}'")
                 elif value_bet_service._team_matches_outcome(away_team, outcome_team):
                     p_true = p_away
                     team_label = away_team
@@ -204,8 +222,13 @@ class Moneyline(Market):
                     print(f"    [CALC] Polymarket ask: ${polymarket_ask:.4f} ({polymarket_ask*100:.2f}%)")
                     print(f"    [CALC] Payout per $1 if win: ${payout_per_1:.4f}")
                     print(f"    [CALC] Expected payout = {p_true:.4f} * {payout_per_1:.4f} = ${expected_payout:.4f}")
-                    print(f"    [CALC] Threshold: ${value_bet_service.MIN_EXPECTED_PAYOUT_PER_1:.4f}")
+                    print(f"    [CALC] Threshold: ${value_bet_service.MIN_EXPECTED_PAYOUT_PER_1:.4f} - ${value_bet_service.MAX_EXPECTED_PAYOUT_PER_1:.4f}")
                     print(f"    [CALC] Edge: {(expected_payout - 1.0) * 100:.2f}%")
+                
+                if expected_payout > value_bet_service.MAX_EXPECTED_PAYOUT_PER_1:
+                    if self.verbose:
+                        print(f"    [SKIP] Expected payout ${expected_payout:.4f} exceeds maximum ${value_bet_service.MAX_EXPECTED_PAYOUT_PER_1:.4f} (likely a bug)")
+                    continue
                 
                 if expected_payout > value_bet_service.MIN_EXPECTED_PAYOUT_PER_1:
                     if self.verbose:
@@ -216,6 +239,7 @@ class Moneyline(Market):
                         true_prob=p_true,
                         polymarket_best_ask=polymarket_ask,
                         expected_payout_per_1=expected_payout,
+                        condition_id=odds.condition_id,
                     )
                     if value_bet is None or candidate.expected_payout_per_1 > value_bet.expected_payout_per_1:
                         value_bet = candidate
@@ -284,7 +308,7 @@ class Moneyline(Market):
             if self.verbose:
                 print(f"  -> [SKIP] Trade execution skipped for soccer (printing only mode)")
         else:
-            trade_result = self.execute_value_bet(value_bet, away_team, home_team, event_slug)
+            trade_result = self.execute_value_bet(value_bet, away_team, home_team, event_slug, market_slug, traded_markets)
         
         # Log attempted value bet (regardless of execution result)
         try:

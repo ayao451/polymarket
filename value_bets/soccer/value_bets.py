@@ -12,7 +12,7 @@ import argparse
 import traceback
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 import os
 import csv
 from typing import Optional, List, Tuple, Dict, Set
@@ -69,33 +69,40 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Polymarket Sports Betting Bot (Soccer)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("--moneyline", action="store_true", help="Run moneyline markets")
+    parser.add_argument("--spreads", action="store_true", help="Run spread markets")
+    parser.add_argument("--totals", action="store_true", help="Run totals markets")
     args = parser.parse_args()
     
     # Always run in verbose mode for soccer
     VERBOSE = True
     
     # Determine which markets to run
-    # For soccer, we focus on moneyline (3-way) for now
-    run_moneyline = args.moneyline if args.moneyline else True
+    run_moneyline = args.moneyline
+    run_spreads = args.spreads
+    run_totals = args.totals
+    
+    # If no flags provided, run all markets
+    if not (run_moneyline or run_spreads or run_totals):
+        run_moneyline = True
+        run_spreads = True
+        run_totals = True
     
     markets_to_run = {
         'moneyline': run_moneyline,
-        'spreads': False,  # Not supported for soccer yet
-        'totals': False,  # Not supported for soccer yet
-        'player_props': False,  # Not supported for soccer yet
+        'spreads': run_spreads,
+        'totals': run_totals,
     }
-    MAX_RUNTIME_SECONDS = 24 * 60 * 60  # 24 hours
+    INNER_LOOP_DURATION_SECONDS = 30 * 60  # 30 minutes
     
     print("\n" + "="*80)
     print("POLYMARKET SPORTS BETTING BOT - STARTING UP (SOCCER)")
     print("="*80)
-    print(f"Max runtime: {MAX_RUNTIME_SECONDS/3600:.0f} hours")
+    print(f"Running forever - refetching events every 30 minutes")
     print(f"Verbose mode: ON (always enabled for soccer)")
     print(f"Markets to run:")
     print(f"  - Moneyline (3-way): {'YES' if markets_to_run['moneyline'] else 'NO'}")
     print(f"  - Spreads: {'YES' if markets_to_run['spreads'] else 'NO'}")
     print(f"  - Totals: {'YES' if markets_to_run['totals'] else 'NO'}")
-    print(f"  - Player Props: {'YES' if markets_to_run['player_props'] else 'NO'}")
     
     if VERBOSE:
         print("\n[INIT] Creating bot interface...")
@@ -109,284 +116,345 @@ def main() -> int:
     if VERBOSE:
         print("[INIT] Pinnacle service created (timeout: 45s)")
     
-    start_time = time.time()
     if VERBOSE:
         print(f"\n[INIT] Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    now = datetime.now().astimezone()
-    today = now.date()
-    date_str = today.strftime("%Y-%m-%d")
-    
-    # Track trades before this iteration
-    trade_count_before = _get_trade_count()
-    if VERBOSE:
-        print(f"\n[INFO] Trades before this run: {trade_count_before}")
-    
-    if VERBOSE:
-        print("")
-        print("=" * 80)
-        print(f"Fetching events and markets for {date_str} (local time)")
-        print("=" * 80)
-    
-    # Step 1 & 3: Fetch both Polymarket events and Pinnacle games, ensuring dates match
-    # We need to find a date where both have games
-    if VERBOSE:
-        print("\n[STEP 1/3] Finding date with both Polymarket and Pinnacle EPL games...")
-    
-    target_date = today
-    polymarket_events = []
-    pinnacle_games = []
-    
-    # Try today and next 7 days to find a match
-    for day_offset in range(0, 8):
-        test_date = today + timedelta(days=day_offset)
-        if VERBOSE:
-            print(f"  -> Trying date: {test_date}")
-        
-        # Fetch Polymarket events for this date
-        pm_events = fetch_polymarket_events_for_date(
-            test_date,
-            whitelisted_prefixes=["epl"],
-            verbose=False,  # Less verbose for multiple attempts
-        )
-        if VERBOSE:
-            print(f"    Polymarket: {len(pm_events)} events")
-        
-        # Fetch Pinnacle games for this date
-        try:
-            pin_games = pinnacle.list_games_for_date(test_date, game_status="all", league_filter="EPL")
-            if VERBOSE:
-                print(f"    Pinnacle: {len(pin_games)} EPL games")
-        except Exception as e:
-            if VERBOSE:
-                print(f"    Pinnacle: ERROR - {e}")
-            pin_games = []
-        
-        # If we have both, use this date
-        if len(pm_events) > 0 and len(pin_games) > 0:
-            target_date = test_date
-            polymarket_events = pm_events
-            pinnacle_games = pin_games
-            if VERBOSE:
-                print(f"  -> [SUCCESS] Found matching date: {test_date}")
-                print(f"      Polymarket: {len(polymarket_events)} events")
-                print(f"      Pinnacle: {len(pinnacle_games)} games")
-            break
-        elif len(pm_events) > 0 or len(pin_games) > 0:
-            if VERBOSE:
-                print(f"    -> Partial match (PM: {len(pm_events)}, PIN: {len(pin_games)})")
-    
-    if not polymarket_events:
-        print("\n[ERROR] No Polymarket EPL events found in next 7 days. Exiting.")
-        return 2
-    
-    if not pinnacle_games:
-        print("\n[ERROR] No Pinnacle EPL games found in next 7 days. Exiting.")
-        return 2
-    
-    # Update today to the target date
-    today = target_date
-    date_str = today.strftime("%Y-%m-%d")
-    if VERBOSE:
-        print(f"\n[INFO] Using date {date_str} for processing")
-        print(f"  -> Polymarket events: {len(polymarket_events)}")
-        print(f"  -> Pinnacle games: {len(pinnacle_games)}")
-    
-    # Step 2: Fetch all event data and market slugs upfront (to avoid refetching later)
-    if VERBOSE:
-        print("\n[STEP 2] Fetching market slugs for each event...")
-    event_slugs = [slug for slug, _, _ in polymarket_events]
-    market_slugs_by_event = fetch_market_slugs_by_event(event_slugs, verbose=VERBOSE)
-    if VERBOSE:
-        print(f"  -> Fetched market slugs for {len(market_slugs_by_event)} events")
-    
-    # Step 4: Match games that exist in both
-    if VERBOSE:
-        print("\n[STEP 4] Matching games between Polymarket and Pinnacle...")
-        print(f"  -> Polymarket events to match: {len(polymarket_events)}")
-        for pm_slug, pm_away, pm_home in polymarket_events:
-            print(f"      Polymarket: {pm_away} @ {pm_home} (slug: {pm_slug})")
-        print(f"  -> Pinnacle games available: {len(pinnacle_games)}")
-        for pin_game in pinnacle_games[:5]:
-            print(f"      Pinnacle: {pin_game.away_team} @ {pin_game.home_team} (league: {pin_game.league})")
-    matched_events = _match_games(polymarket_events, pinnacle_games, verbose=VERBOSE)
-    if VERBOSE:
-        print(f"  -> Found {len(matched_events)} matched games (in both Polymarket and Pinnacle)")
-    
-    if not matched_events:
-        print("\n[ERROR] No matched games found. Exiting.")
-        return 2
-    
-    # Note: Pinnacle odds will be refetched for each game individually to get the most up-to-date data
-    
-    # Sort matched events: EPL prefixed first, everything else second
-    def _sort_key(event_tuple):
-        event_slug = event_tuple[0]  # First element is always event_slug
-        if event_slug.startswith("epl"):
-            return (0, event_slug)  # EPL first
-        else:
-            return (1, event_slug)  # Everything else second
-    
-    matched_events = sorted(matched_events, key=_sort_key)
-    
-    # Log all matched events with both Polymarket and Pinnacle representations
-    if VERBOSE:
-        print("")
-        print("=" * 80)
-        print("MATCHED EVENTS (will be processed):")
-        print("=" * 80)
-        for i, match_data in enumerate(matched_events, 1):
-            event_slug, away_team, home_team, pinnacle_game = match_data
-            matchup_id = pinnacle_game.matchup_id
-            league = pinnacle_game.league
-            print(f"  {i}. Polymarket: [{event_slug}]")
-            print(f"      Pinnacle:  [MatchupID: {matchup_id}, League: {league}] {away_team} @ {home_team}")
-        print("=" * 80)
-    
-    # Step 5: Main processing loop - iterate through matched games and markets
-    if VERBOSE:
-        print("")
-        print("=" * 80)
-        print("STARTING MAIN PROCESSING LOOP")
-        print("Processing matched games for value bets...")
-        print("=" * 80)
-    
-    iteration = 0
     trade_executor = TradeExecutorService()
-    
-    # Track which (event_slug, market_slug) combinations have been traded
-    # to avoid trading the same market twice
-    traded_markets: Set[Tuple[str, str]] = set()
-    
+
     # Create a shared thread pool executor for async processing
     executor = ThreadPoolExecutor(max_workers=10)
-    
-    while (time.time() - start_time) < MAX_RUNTIME_SECONDS:
-        iteration += 1
-        elapsed = time.time() - start_time
-        remaining = MAX_RUNTIME_SECONDS - elapsed
+
+    # Track which market slugs have been traded; persist across refetch cycles to prevent duplicate bets
+    traded_markets: Set[str] = set()
+
+    # Outer loop: runs forever, refetches events every 30 minutes
+    while True:
+        # For soccer, use fixed date: January 24, 2026 and January 25, 2026
+        today = date(2026, 1, 24)
+        tomorrow = date(2026, 1, 25)
+        date_str = today.strftime("%Y-%m-%d")
+        tomorrow_str = tomorrow.strftime("%Y-%m-%d")
         
-        # Check bankroll before each iteration
-        bankroll = trade_executor.get_usdc_balance()
-        if bankroll is not None and bankroll < MIN_BANKROLL:
-            print(f"\n{'!'*60}")
-            print(f"!!! BANKROLL TOO LOW - STOPPING !!!")
-            print(f"{'!'*60}")
-            print(f"  Current bankroll: ${bankroll:.2f}")
-            print(f"  Minimum required: ${MIN_BANKROLL:.2f}")
-            print(f"  Exiting to protect remaining funds.")
-            
+        # Track trades before this iteration
+        trade_count_before = _get_trade_count()
+        if VERBOSE:
+            print(f"\n[INFO] Trades before this run: {trade_count_before}")
         
         if VERBOSE:
-            print("\n" + "="*80)
-            print(f"ITERATION #{iteration}")
-            print(f"Bankroll: ${bankroll:.2f}" if bankroll else "Bankroll: Unknown")
-            print(f"Elapsed time: {elapsed/60:.1f} minutes")
-            print(f"Remaining time: {remaining/60:.1f} minutes")
-            print(f"Processing {len(matched_events)} matched games in parallel...")
-            print("="*80)
+            print("")
+            print("=" * 80)
+            print(f"Fetching events and markets for {date_str} and {tomorrow_str} (soccer fixed dates)")
+            print("=" * 80)
         
-        async def process_game_async(
-            event_slug: str,
-            away_team: str,
-            home_team: str,
-            pinnacle_game,
-            game_index: int,
-            total_games: int,
-        ) -> None:
-            """Process a single game asynchronously."""
+        # Step 1: Fetch Polymarket events for January 24, 2026 and January 25, 2026
+        # Try EPL first, but if none found, try all events and filter for soccer/EPL
+        if VERBOSE:
+            print("\n[STEP 1] Fetching Polymarket events for January 24, 2026 and January 25, 2026...")
+        polymarket_events_today = fetch_polymarket_events_for_date(
+            today,
+            whitelisted_prefixes=["epl"],
+            verbose=VERBOSE,
+        )
+        polymarket_events_tomorrow = fetch_polymarket_events_for_date(
+            tomorrow,
+            whitelisted_prefixes=["epl"],
+            verbose=VERBOSE,
+        )
+        polymarket_events = polymarket_events_today + polymarket_events_tomorrow
+        if VERBOSE:
+            print(f"  -> Found {len(polymarket_events_today)} Polymarket events for {date_str}")
+            print(f"  -> Found {len(polymarket_events_tomorrow)} Polymarket events for {tomorrow_str}")
+            print(f"  -> Total: {len(polymarket_events)} Polymarket events (EPL only)")
+        
+        # If no EPL events, try all events and look for soccer-related
+        if not polymarket_events:
             if VERBOSE:
-                print(f"\n--- Game {game_index}/{total_games} ---")
-                print(f"[{game_index}/{total_games}] {away_team} @ {home_team}")
-                print("-" * 60)
+                print("  -> No EPL events found, checking all events for soccer...")
+            all_events_today = fetch_polymarket_events_for_date(
+                today,
+                whitelisted_prefixes=None,
+                verbose=False,
+            )
+            all_events_tomorrow = fetch_polymarket_events_for_date(
+                tomorrow,
+                whitelisted_prefixes=None,
+                verbose=False,
+            )
+            # Filter for soccer/EPL related events
+            for slug, away, home in all_events_today + all_events_tomorrow:
+                slug_lower = slug.lower()
+                if "epl" in slug_lower or "soccer" in slug_lower or "football" in slug_lower:
+                    polymarket_events.append((slug, away, home))
+            if VERBOSE:
+                print(f"  -> Found {len(polymarket_events)} soccer-related events after filtering")
+        
+        if not polymarket_events:
+            print("\n[WARNING] No Polymarket soccer/EPL events found for January 24-25, 2026. Waiting 5 minutes before retrying...")
+            time.sleep(5 * 60)
+            continue
+        
+        # Step 3: Fetch Pinnacle games for January 24, 2026 and January 25, 2026
+        # Filter for actual "England - Premier League" (not lower leagues)
+        if VERBOSE:
+            print("\n[STEP 3] Fetching Pinnacle games for January 24-25, 2026...")
+            print("  -> Filtering for England - Premier League games...")
+        pinnacle_games = []
+        try:
+            # Get all soccer games for both dates
+            all_pinnacle_games_today = pinnacle.list_games_for_date(today, game_status="all")
+            all_pinnacle_games_tomorrow = pinnacle.list_games_for_date(tomorrow, game_status="all")
+            all_pinnacle_games = all_pinnacle_games_today + all_pinnacle_games_tomorrow
+            if VERBOSE:
+                print(f"  -> Found {len(all_pinnacle_games_today)} total soccer games for {date_str}")
+                print(f"  -> Found {len(all_pinnacle_games_tomorrow)} total soccer games for {tomorrow_str}")
+                print(f"  -> Total: {len(all_pinnacle_games)} total soccer games")
             
-            # Skip games that have already started
-            if pinnacle_game and pinnacle_game.start_time_utc:
-                now_utc = datetime.now(timezone.utc)
-                if pinnacle_game.start_time_utc < now_utc:
-                    if VERBOSE:
-                        print(f"[SKIP] Game has already started")
-                        print(f"  Start time: {pinnacle_game.start_time_utc.isoformat()}")
-                        print(f"  Current time: {now_utc.isoformat()}")
-                    return
-                else:
-                    time_until_start = pinnacle_game.start_time_utc - now_utc
-                    if VERBOSE:
-                        print(f"[OK] Game starts in {time_until_start.total_seconds()/60:.0f} minutes")
+            # Filter for actual Premier League (not lower leagues)
+            for g in all_pinnacle_games:
+                league_upper = g.league.upper()
+                # Match "England - Premier League" exactly, excluding lower leagues
+                if (league_upper == "ENGLAND - PREMIER LEAGUE" or 
+                    (league_upper.startswith("ENGLAND") and "PREMIER LEAGUE" in league_upper and
+                     "ISTHMIAN" not in league_upper and "NORTHERN" not in league_upper and 
+                     "SOUTHERN" not in league_upper and "CHAMPIONSHIP" not in league_upper)):
+                    pinnacle_games.append(g)
             
-            # Get markets for this event (from our pre-fetched hashmap)
-            markets = market_slugs_by_event.get(event_slug, {})
-            if not markets:
+            if VERBOSE:
+                print(f"  -> Found {len(pinnacle_games)} actual Premier League games (excluding lower leagues)")
+                if len(pinnacle_games) == 0:
+                    print("  -> [INFO] No actual EPL games found, but will try to match with available games")
+                    # If no actual EPL, use all games for matching
+                    pinnacle_games = all_pinnacle_games[:50]  # Limit to first 50 to avoid too many
+                    print(f"  -> Using first {len(pinnacle_games)} games for matching")
+        except Exception as e:
+            print(f"  -> [ERROR] Failed to fetch Pinnacle games: {e}")
+            traceback.print_exc()
+            pinnacle_games = []
+        
+        if not pinnacle_games:
+            print("\n[WARNING] No Pinnacle games found for January 24-25, 2026. Waiting 5 minutes before retrying...")
+            time.sleep(5 * 60)
+            continue
+        
+        if VERBOSE:
+            print(f"  -> Final count: {len(pinnacle_games)} Pinnacle games for matching")
+        
+        # Step 2: Fetch all event data and market slugs upfront (to avoid refetching later)
+        if VERBOSE:
+            print("\n[STEP 2] Fetching market slugs for each event...")
+        event_slugs = [slug for slug, _, _ in polymarket_events]
+        market_slugs_by_event = fetch_market_slugs_by_event(event_slugs, verbose=VERBOSE)
+        if VERBOSE:
+            print(f"  -> Fetched market slugs for {len(market_slugs_by_event)} events")
+        
+        # Step 4: Match games that exist in both
+        if VERBOSE:
+            print("\n[STEP 4] Matching games between Polymarket and Pinnacle...")
+            print(f"  -> Polymarket events to match: {len(polymarket_events)}")
+            for pm_slug, pm_away, pm_home in polymarket_events:
+                print(f"      Polymarket: {pm_away} @ {pm_home} (slug: {pm_slug})")
+            print(f"  -> Pinnacle games available: {len(pinnacle_games)}")
+            for pin_game in pinnacle_games[:5]:
+                print(f"      Pinnacle: {pin_game.away_team} @ {pin_game.home_team} (league: {pin_game.league})")
+        matched_events = _match_games(polymarket_events, pinnacle_games, verbose=VERBOSE)
+        if VERBOSE:
+            print(f"  -> Found {len(matched_events)} matched games (in both Polymarket and Pinnacle)")
+        
+        if not matched_events:
+            print("\n[WARNING] No matched games found. Waiting 5 minutes before retrying...")
+            time.sleep(5 * 60)
+            continue
+        
+        # Note: Pinnacle odds will be refetched for each game individually to get the most up-to-date data
+        
+        # Sort matched events: EPL prefixed first, everything else second
+        def _sort_key(event_tuple):
+            event_slug = event_tuple[0]  # First element is always event_slug
+            if event_slug.startswith("epl"):
+                return (0, event_slug)  # EPL first
+            else:
+                return (1, event_slug)  # Everything else second
+        
+        matched_events = sorted(matched_events, key=_sort_key)
+        
+        # Log all matched events with both Polymarket and Pinnacle representations
+        if VERBOSE:
+            print("")
+            print("=" * 80)
+            print("MATCHED EVENTS (will be processed):")
+            print("=" * 80)
+            for i, match_data in enumerate(matched_events, 1):
+                event_slug, away_team, home_team, pinnacle_game = match_data
+                matchup_id = pinnacle_game.matchup_id
+                league = pinnacle_game.league
+                print(f"  {i}. Polymarket: [{event_slug}]")
+                print(f"      Pinnacle:  [MatchupID: {matchup_id}, League: {league}] {away_team} @ {home_team}")
+            print("=" * 80)
+        
+        # Step 5: Main processing loop - iterate through matched games and markets
+        if VERBOSE:
+            print("")
+            print("=" * 80)
+            print("STARTING MAIN PROCESSING LOOP")
+            print("Processing matched games for value bets...")
+            print("=" * 80)
+        
+        iteration = 0
+
+        # Inner loop: runs for 30 minutes, then breaks to refetch events
+        inner_loop_start_time = time.time()
+        while True:
+            iteration += 1
+            elapsed = time.time() - inner_loop_start_time
+            remaining = INNER_LOOP_DURATION_SECONDS - elapsed
+            
+            # Check if 30 minutes have elapsed
+            if elapsed >= INNER_LOOP_DURATION_SECONDS:
                 if VERBOSE:
-                    print(f"[SKIP] No markets found for this event")
-                return
+                    print(f"\n[INNER LOOP COMPLETE] 30 minutes elapsed. Breaking to refetch events...")
+                break
+            
+            # Check bankroll before each iteration
+            bankroll = trade_executor.get_usdc_balance()
+            if bankroll is not None and bankroll < MIN_BANKROLL:
+                print(f"\n{'!'*60}")
+                print(f"!!! BANKROLL TOO LOW - STOPPING !!!")
+                print(f"{'!'*60}")
+                print(f"  Current bankroll: ${bankroll:.2f}")
+                print(f"  Minimum required: ${MIN_BANKROLL:.2f}")
+                print(f"  Exiting to protect remaining funds.")
+                executor.shutdown(wait=True)
+                return 1
             
             if VERBOSE:
-                print(f"[OK] Found markets: moneyline={len(markets.get('moneyline', []))}, "
-                      f"spreads={len(markets.get('spreads', []))}, "
-                      f"totals={len(markets.get('totals', []))}, "
-                      f"player_props={len(markets.get('player_props', []))}")
+                print("\n" + "="*80)
+                print(f"ITERATION #{iteration}")
+                print(f"Bankroll: ${bankroll:.2f}" if bankroll else "Bankroll: Unknown")
+                print(f"Elapsed time in inner loop: {elapsed/60:.1f} minutes")
+                print(f"Remaining time in inner loop: {remaining/60:.1f} minutes")
+                print(f"Processing {len(matched_events)} matched games in parallel...")
+                print("="*80)
             
-            # Process this game using the bot interface
-            if VERBOSE:
-                print(f"\n[PROCESSING] Starting value bet analysis for: {away_team} @ {home_team}")
-                print(f"  Event slug: {event_slug}")
-                print(f"  Markets available: {list(markets.keys())}")
+            async def process_game_async(
+                event_slug: str,
+                away_team: str,
+                home_team: str,
+                pinnacle_game,
+                game_index: int,
+                total_games: int,
+            ) -> None:
+                """Process a single game asynchronously."""
+                # Check if 30 minutes have elapsed during game processing
+                if (time.time() - inner_loop_start_time) >= INNER_LOOP_DURATION_SECONDS:
+                    if VERBOSE:
+                        print(f"\n[INNER LOOP COMPLETE] 30 minutes elapsed during game processing. Breaking to refetch events...")
+                    return
+                
+                if VERBOSE:
+                    print(f"\n--- Game {game_index}/{total_games} ---")
+                    print(f"[{game_index}/{total_games}] {away_team} @ {home_team}")
+                    print("-" * 60)
+                
+                # Skip games that have already started or are more than 12 hours away
+                if pinnacle_game and pinnacle_game.start_time_utc:
+                    now_utc = datetime.now(timezone.utc)
+                    time_until_start = pinnacle_game.start_time_utc - now_utc
+                    
+                    if pinnacle_game.start_time_utc < now_utc:
+                        if VERBOSE:
+                            print(f"[SKIP] Game has already started")
+                            print(f"  Start time: {pinnacle_game.start_time_utc.isoformat()}")
+                            print(f"  Current time: {now_utc.isoformat()}")
+                        return
+                    elif time_until_start.total_seconds() > 12 * 60 * 60:  # More than 12 hours
+                        if VERBOSE:
+                            print(f"[SKIP] Game is more than 12 hours away")
+                            print(f"  Start time: {pinnacle_game.start_time_utc.isoformat()}")
+                            print(f"  Current time: {now_utc.isoformat()}")
+                            print(f"  Time until start: {time_until_start.total_seconds()/3600:.1f} hours")
+                        return
+                    else:
+                        if VERBOSE:
+                            print(f"[OK] Game starts in {time_until_start.total_seconds()/60:.0f} minutes")
+                
+                # Get markets for this event (from our pre-fetched hashmap)
+                markets = market_slugs_by_event.get(event_slug, {})
+                if not markets:
+                    if VERBOSE:
+                        print(f"[SKIP] No markets found for this event")
+                    return
+                
+                if VERBOSE:
+                    print(f"[OK] Found markets: moneyline={len(markets.get('moneyline', []))}, "
+                          f"spreads={len(markets.get('spreads', []))}, "
+                          f"totals={len(markets.get('totals', []))}")
+                
+                # Process this game using the bot interface
+                if VERBOSE:
+                    print(f"\n[PROCESSING] Starting value bet analysis for: {away_team} @ {home_team}")
+                    print(f"  Event slug: {event_slug}")
+                    print(f"  Markets available: {list(markets.keys())}")
+                
+                # Run the synchronous bot.run_all_markets in a thread pool
+                try:
+                    await asyncio.get_event_loop().run_in_executor(
+                        executor,
+                        lambda: bot.run_all_markets(
+                            away_team=away_team,
+                            home_team=home_team,
+                            play_date=today,
+                            event_slug=event_slug,
+                            market_slugs_by_event=market_slugs_by_event,
+                            traded_markets=traded_markets,
+                            markets_to_run=markets_to_run,
+                        )
+                    )
+                    if VERBOSE:
+                        print(f"[DONE] Finished processing: {away_team} @ {home_team}")
+                except Exception as e:
+                    print(f"[ERROR] Exception while processing {away_team} @ {home_team}: {e}")
+                    traceback.print_exc()
             
-            # Run the synchronous bot.run_all_markets in a thread pool
-            try:
-                await asyncio.get_event_loop().run_in_executor(
-                    executor,
-                    lambda: bot.run_all_markets(
+            # Process all games in parallel
+            async def process_all_games() -> None:
+                tasks = []
+                for i, [event_slug, away_team, home_team, pinnacle_game] in enumerate(matched_events, 1):
+                    # Check if 30 minutes have elapsed before creating task
+                    if (time.time() - inner_loop_start_time) >= INNER_LOOP_DURATION_SECONDS:
+                        if VERBOSE:
+                            print(f"\n[INNER LOOP COMPLETE] 30 minutes elapsed. Breaking to refetch events...")
+                        break
+                    task = process_game_async(
+                        event_slug=event_slug,
                         away_team=away_team,
                         home_team=home_team,
-                        play_date=today,
-                        event_slug=event_slug,
-                        market_slugs_by_event=market_slugs_by_event,
-                        traded_markets=traded_markets,
-                        markets_to_run=markets_to_run,
+                        pinnacle_game=pinnacle_game,
+                        game_index=i,
+                        total_games=len(matched_events),
                     )
-                )
-                if VERBOSE:
-                    print(f"[DONE] Finished processing: {away_team} @ {home_team}")
-            except Exception as e:
-                print(f"[ERROR] Exception while processing {away_team} @ {home_team}: {e}")
-                traceback.print_exc()
-        
-        # Process all games in parallel
-        async def process_all_games() -> None:
-            tasks = []
-            for i, [event_slug, away_team, home_team, pinnacle_game] in enumerate(matched_events, 1):
-                task = process_game_async(
-                    event_slug=event_slug,
-                    away_team=away_team,
-                    home_team=home_team,
-                    pinnacle_game=pinnacle_game,
-                    game_index=i,
-                    total_games=len(matched_events),
-                )
-                tasks.append(task)
+                    tasks.append(task)
+                
+                # Run all games in parallel
+                await asyncio.gather(*tasks, return_exceptions=True)
             
-            # Run all games in parallel
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # Run the async processing
+            asyncio.run(process_all_games())
+            
+            # Check if we should break from inner loop (30 minutes elapsed)
+            if (time.time() - inner_loop_start_time) >= INNER_LOOP_DURATION_SECONDS:
+                if VERBOSE:
+                    print(f"\n[INNER LOOP COMPLETE] 30 minutes elapsed. Breaking to refetch events...")
+                break
+            
+            if VERBOSE:
+                print(f"\n[ITERATION COMPLETE] Continuing inner loop...")
+                print(f"  Remaining time in inner loop: {(INNER_LOOP_DURATION_SECONDS - (time.time() - inner_loop_start_time))/60:.1f} minutes")
         
-        # Run the async processing
-        asyncio.run(process_all_games())
-        
-        
-        # Check if we should continue
-        remaining_runtime = MAX_RUNTIME_SECONDS - (time.time() - start_time)
-        if remaining_runtime <= 0:
-            break
-        
-        if VERBOSE:
-            print(f"\n[ITERATION COMPLETE] Sleeping before next iteration...")
-            print(f"  Remaining runtime: {remaining_runtime/60:.1f} minutes")
-
-    # Shutdown the executor
+        # After inner loop breaks, continue to outer loop to refetch events
+    
+    # Shutdown the executor (should never reach here, but just in case)
     executor.shutdown(wait=True)
     
-    print(f"\n[EXIT] Reached max runtime ({MAX_RUNTIME_SECONDS/3600:.0f} hours). Exiting.")
     return 0
 
 

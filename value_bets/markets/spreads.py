@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set
 
 from polymarket_odds_service.polymarket_odds import PolymarketOdds
 
@@ -54,6 +54,7 @@ class Spreads(Market):
         play_date: date,
         event_slug: str,
         market_slug: str,
+        traded_markets: Optional[Set[str]] = None,
     ) -> Optional[SpreadValueBet]:
         """
         Run the full spreads flow for a single market slug.
@@ -167,7 +168,7 @@ class Spreads(Market):
         # Step 4: Calculate Kelly bet size and execute trade
         if self.verbose:
             print(f"\n[STEP 4/4] Executing trade with Kelly Criterion sizing...")
-        trade_result = self.execute_value_bet(value_bet, away_team, home_team, event_slug)
+        trade_result = self.execute_value_bet(value_bet, away_team, home_team, event_slug, market_slug, traded_markets)
         
         # Log attempted value bet (regardless of execution result)
         try:

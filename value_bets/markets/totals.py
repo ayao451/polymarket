@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from polymarket_odds_service.polymarket_odds import PolymarketOdds
 
@@ -31,15 +31,52 @@ class Totals(Market):
     @staticmethod
     def _parse_total_line_from_slug(slug: str) -> Optional[float]:
         """
-        Parse total line from market slug like 'nba-lal-por-2026-01-17-total-228pt5' -> 228.5
+        Parse total line from market slug.
+        Handles: total-228pt5, total-games-24pt5, total-sets-5pt5, match-total-36pt5,
+        set-totals-2pt5, 1h-total-115pt5.
         """
-        # Match patterns like "total-228pt5" or "1h-total-115pt5"
-        m = re.search(r"total-(\d+)pt(\d+)", slug, flags=re.IGNORECASE)
-        if m:
-            whole = int(m.group(1))
-            decimal = int(m.group(2))
-            return float(f"{whole}.{decimal}")
+        patterns = [
+            r"(?:total(?:-games|-sets)?-)(\d+)pt(\d+)",
+            r"match-total-(\d+)pt(\d+)",
+            r"set-totals-(\d+)pt(\d+)",
+            r"total-(\d+)pt(\d+)",
+        ]
+        for pat in patterns:
+            m = re.search(pat, slug, flags=re.IGNORECASE)
+            if m:
+                whole = int(m.group(1))
+                dec = int(m.group(2))
+                return float(f"{whole}.{dec}")
         return None
+
+    @staticmethod
+    def _totals_type_from_slug(slug: str) -> Optional[str]:
+        """
+        Infer totals sub-type from market slug for tennis.
+        Returns "games" | "sets" | None (generic totals).
+        """
+        s = (slug or "").lower()
+        if "total" not in s:
+            return None
+        if "match-total" in s or "games" in s:
+            return "games"
+        if "set-totals" in s or "sets" in s:
+            return "sets"
+        return None
+
+    def _fetch_sportsbook_totals(
+        self,
+        away_team: str,
+        home_team: str,
+        play_date: date,
+        totals_type: Optional[str],
+    ):
+        """Fetch totals odds from sportsbook; totals_type is 'games' | 'sets' | None (generic)."""
+        if totals_type == "games":
+            return self.sportsbook.get_totals_games_odds(away_team, home_team, play_date)
+        if totals_type == "sets":
+            return self.sportsbook.get_totals_sets_odds(away_team, home_team, play_date)
+        return self.sportsbook.get_totals_odds(away_team, home_team, play_date)
 
     def run(
         self,
@@ -48,21 +85,32 @@ class Totals(Market):
         play_date: date,
         event_slug: str,
         market_slug: str,
+        traded_markets: Optional[Set[str]] = None,
     ) -> Optional[TotalsValueBet]:
         """
         Run the full totals flow for a single market slug.
+        Infers totals_type (games/sets) from slug for tennis total-games / total-sets.
         """
+        totals_type = self._totals_type_from_slug(market_slug)
+        label = "TOTALS (O/U)"
+        if totals_type == "games":
+            label = "TOTALS GAMES (O/U)"
+        elif totals_type == "sets":
+            label = "TOTALS SETS (O/U)"
+
         # Step 1: Get sportsbook totals odds
         if self.verbose:
             print(f"\n{'='*60}")
-            print(f"TOTALS (O/U): {away_team} @ {home_team}")
+            print(f"{label}: {away_team} @ {home_team}")
             print(f"Date: {play_date}")
             print(f"Event: {event_slug}")
             print(f"Market: {market_slug}")
             print(f"{'='*60}")
             print(f"\n[STEP 1/4] Fetching sportsbook totals odds from Pinnacle...")
         
-        sportsbook_totals = self.sportsbook.get_totals_odds(away_team, home_team, play_date)
+        sportsbook_totals = self._fetch_sportsbook_totals(
+            away_team, home_team, play_date, totals_type
+        )
         if not sportsbook_totals:
             if self.verbose:
                 print(f"  -> [FAILED] Could not fetch sportsbook totals odds")
@@ -125,8 +173,13 @@ class Totals(Market):
         
         # Always print value bet found
         edge_pct = (value_bet.true_prob - value_bet.polymarket_best_ask) * 100
+        vb_label = "TOTALS"
+        if totals_type == "games":
+            vb_label = "TOTALS GAMES"
+        elif totals_type == "sets":
+            vb_label = "TOTALS SETS"
         print(f"\n{'*'*60}")
-        print(f"*** VALUE BET FOUND (TOTALS) ***")
+        print(f"*** VALUE BET FOUND ({vb_label}) ***")
         print(f"{'*'*60}")
         print(f"  Game: {away_team} @ {home_team}")
         print(f"  Bet on: {value_bet.side} {value_bet.total_point}")
@@ -152,7 +205,7 @@ class Totals(Market):
         # Step 4: Calculate Kelly bet size and execute trade
         if self.verbose:
             print(f"\n[STEP 4/4] Executing trade with Kelly Criterion sizing...")
-        trade_result = self.execute_value_bet(value_bet, away_team, home_team, event_slug)
+        trade_result = self.execute_value_bet(value_bet, away_team, home_team, event_slug, market_slug, traded_markets)
         
         # Log attempted value bet (regardless of execution result)
         try:

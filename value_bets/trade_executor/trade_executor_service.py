@@ -42,6 +42,7 @@ class TradeExecutionResult:
     error: Optional[str] = None
     filled_size: Optional[float] = None  # Actual filled size (for partial fills)
     event_slug: Optional[str] = None  # Polymarket event slug
+    condition_id: Optional[str] = None  # Polymarket condition ID
     
     @property
     def is_partial_fill(self) -> bool:
@@ -99,6 +100,7 @@ class TradeExecutorService:
         game: Optional[str] = None,
         expected_payout_per_1: Optional[float] = None,
         event_slug: Optional[str] = None,
+        condition_id: Optional[str] = None,
         error: str,
     ) -> TradeExecutionResult:
         return TradeExecutionResult(
@@ -114,6 +116,7 @@ class TradeExecutorService:
             response=None,
             error=error,
             event_slug=event_slug,
+            condition_id=condition_id,
         )
 
     @staticmethod
@@ -192,6 +195,7 @@ class TradeExecutorService:
                 "tx_hashes": tx_hashes_s,
                 "token_id": str(result.token_id),
                 "event_slug": ("" if result.event_slug is None else str(result.event_slug)),
+                "condition_id": ("" if result.condition_id is None else str(result.condition_id)),
             }
 
             path = cls._trades_csv_path()
@@ -218,6 +222,7 @@ class TradeExecutorService:
         game: Optional[str] = None,
         expected_payout_per_1: Optional[float] = None,
         event_slug: Optional[str] = None,
+        condition_id: Optional[str] = None,
     ) -> TradeExecutionResult:
         """
         Execute an order on Polymarket CLOB.
@@ -235,6 +240,7 @@ class TradeExecutorService:
                 game=game,
                 expected_payout_per_1=expected_payout_per_1,
                 event_slug=event_slug,
+                condition_id=condition_id,
                 error=self._init_error or "Trade executor not initialized",
             )
 
@@ -249,6 +255,7 @@ class TradeExecutorService:
                 game=game,
                 expected_payout_per_1=expected_payout_per_1,
                 event_slug=event_slug,
+                condition_id=condition_id,
                 error=f"Invalid side '{side}'. Expected BUY or SELL.",
             )
         if not token_id:
@@ -262,6 +269,7 @@ class TradeExecutorService:
                 game=game,
                 expected_payout_per_1=expected_payout_per_1,
                 event_slug=event_slug,
+                condition_id=condition_id,
                 error="token_id is required",
             )
         if price <= 0:
@@ -275,6 +283,7 @@ class TradeExecutorService:
                 game=game,
                 expected_payout_per_1=expected_payout_per_1,
                 event_slug=event_slug,
+                condition_id=condition_id,
                 error="price must be > 0",
             )
         if size <= 0:
@@ -288,6 +297,7 @@ class TradeExecutorService:
                 game=game,
                 expected_payout_per_1=expected_payout_per_1,
                 event_slug=event_slug,
+                condition_id=condition_id,
                 error="size must be > 0",
             )
 
@@ -329,6 +339,7 @@ class TradeExecutorService:
                 error=None,
                 filled_size=filled_size,
                 event_slug=event_slug,
+                condition_id=condition_id,
             )
             self._append_successful_trade(result)
             return result
@@ -343,6 +354,7 @@ class TradeExecutorService:
                 game=game,
                 expected_payout_per_1=expected_payout_per_1,
                 event_slug=event_slug,
+                condition_id=condition_id,
                 error=f"{e} ({type(e).__name__})",
             )
 

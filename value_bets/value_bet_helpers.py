@@ -10,7 +10,7 @@ import os
 import re
 import requests
 import csv
-from polymarket_sports_betting_bot.value_bet_service import ValueBet, SpreadValueBet, TotalsValueBet, PlayerPropValueBet
+from polymarket_sports_betting_bot.value_bet_service import ValueBet, SpreadValueBet, TotalsValueBet
 
 from polymarket_odds_service.polymarket_odds import (
     PolymarketGameFinder,
@@ -203,47 +203,6 @@ def log_attempted_totals_bet(
     )
 
 
-def log_attempted_player_prop_bet(
-    value_bet: Any,
-    away_team: str,
-    home_team: str,
-    event_slug: str,
-    market_slug: str,
-    executed: bool = False,
-    error: Optional[str] = None,
-) -> None:
-    """Log an attempted player prop value bet to attempted_value_bets_player_props.csv."""
-    # Use isinstance to check type and access attributes directly
-    if isinstance(value_bet, PlayerPropValueBet):
-        player_name = value_bet.player_name
-        line = value_bet.line
-        prop_type = value_bet.prop_type
-    else:
-        # Fallback if structure is different - try direct access with try/except
-        try:
-            player_name = value_bet.player_name
-            line = value_bet.line
-            prop_type = value_bet.prop_type
-        except AttributeError:
-            player_name = 'Unknown'
-            line = None
-            prop_type = None
-    
-    path = _get_log_file_path('player_props')
-    _log_value_bet_to_file(
-        path=path,
-        value_bet=value_bet,
-        away_team=away_team,
-        home_team=home_team,
-        event_slug=event_slug,
-        market_slug=market_slug,
-        executed=executed,
-        error=error,
-        outcome=player_name,
-        line=line,
-        prop_type=prop_type,
-        player_name=player_name,
-    )
 
 
 def log_value_bet(
@@ -277,9 +236,6 @@ def log_value_bet(
         outcome = f"{value_bet.team} {value_bet.point:+g}"
     elif isinstance(value_bet, TotalsValueBet):
         outcome = f"{value_bet.side} {value_bet.total_point}"
-    elif isinstance(value_bet, PlayerPropValueBet):
-        side = f" {value_bet.side}" if value_bet.side else ""
-        outcome = f"{value_bet.player_name} {value_bet.prop_type} {value_bet.line}{side}"
     else:
         # Fallback for unknown types - try direct access
         try:
@@ -335,6 +291,119 @@ def normalize_team_name(s: str) -> str:
     return normalized
 
 
+def games_match(
+    pm_away: str,
+    pm_home: str,
+    pin_away: str,
+    pin_home: str,
+) -> bool:
+    """
+    Check if two games match by ensuring both away teams match and both home teams match.
+    
+    This is stricter than individual team matching because it requires both teams
+    to match in the correct pairing, preventing false matches from shared location names.
+    
+    Args:
+        pm_away: Polymarket away team
+        pm_home: Polymarket home team
+        pin_away: Pinnacle away team
+        pin_home: Pinnacle home team
+    
+    Returns:
+        True if the games match (either normal or swapped order)
+    """
+    # Check normal order: pm_away matches pin_away AND pm_home matches pin_home
+    match_normal = (
+        teams_match_strict(pm_away, pin_away) and
+        teams_match_strict(pm_home, pin_home)
+    )
+    
+    # Check swapped order: pm_away matches pin_home AND pm_home matches pin_away
+    match_swapped = (
+        teams_match_strict(pm_away, pin_home) and
+        teams_match_strict(pm_home, pin_away)
+    )
+    
+    return match_normal or match_swapped
+
+
+def teams_match_strict(team1: str, team2: str) -> bool:
+    """
+    Strict team matching that requires distinctive identifiers to match.
+    
+    This is more restrictive than teams_match() to prevent false matches
+    from teams that only share location names (e.g., "Dinamo Minsk" vs "Yunost Minsk").
+    """
+    norm1 = normalize_team_name(team1)
+    norm2 = normalize_team_name(team2)
+    
+    if norm1 == norm2:
+        return True
+    
+    # Check if one name starts with the other
+    if norm1.startswith(norm2) or norm2.startswith(norm1):
+        return True
+    
+    # For soccer teams, check common patterns
+    norm1_clean = norm1.replace("&", "").replace(" and ", " ")
+    norm2_clean = norm2.replace("&", "").replace(" and ", " ")
+    if norm1_clean == norm2_clean:
+        return True
+    if norm1_clean.startswith(norm2_clean) or norm2_clean.startswith(norm1_clean):
+        return True
+    
+    words1 = norm1.split()
+    words2 = norm2.split()
+    
+    # Check if last word matches (nickname matching)
+    # Only match if one name is just the nickname, or if first word also matches
+    if words1 and words2 and words1[-1] == words2[-1]:
+        # Case 1: One name is just the nickname (e.g., "Heat" vs "Miami Heat")
+        if len(words1) == 1 or len(words2) == 1:
+            return True
+        # Case 2: First word also matches (e.g., "Gonzaga Bulldogs" vs "Gonzaga Bulldogs")
+        if words1[0] == words2[0]:
+            return True
+    
+    # Check if one contains the other (but require at least one distinctive word to match)
+    if norm1 in norm2 or norm2 in norm1:
+        return True
+    if norm1_clean in norm2_clean or norm2_clean in norm1_clean:
+        return True
+    
+    # Check if first word matches (for NCAA/international/soccer)
+    if words1 and words2:
+        if words1[0] == words2[0] and len(words1[0]) > 3:
+            return True
+        # For soccer: "Brighton & Hove Albion" vs "Brighton"
+        if len(words1) > 1 and len(words2) == 1:
+            if words1[0] == words2[0]:
+                return True
+        if len(words2) > 1 and len(words1) == 1:
+            if words2[0] == words1[0]:
+                return True
+    
+    # Check if all words from shorter name are in longer name
+    if len(words1) > 1 and len(words2) > 1:
+        shorter = words1 if len(words1) < len(words2) else words2
+        longer = words2 if len(words1) < len(words2) else words1
+        if all(word in longer for word in shorter if len(word) > 2):
+            return True
+    
+    # For soccer: check if FIRST key word matches (the distinctive identifier)
+    # This prevents matching teams that only share a location name
+    key_words1 = [w for w in words1 if len(w) > 3]
+    key_words2 = [w for w in words2 if len(w) > 3]
+    if key_words1 and key_words2:
+        # Only match if the first key word (main identifier) from one appears in the other
+        first_keyword1 = key_words1[0]
+        first_keyword2 = key_words2[0]
+        if first_keyword1 in norm2 or first_keyword2 in norm1:
+            return True
+    
+    return False
+
+
 def teams_match(team1: str, team2: str) -> bool:
     """
     Check if two team names match (fuzzy matching).
@@ -365,10 +434,16 @@ def teams_match(team1: str, team2: str) -> bool:
         return True
     
     # Check if last word matches (nickname matching)
+    # Only match if one name is just the nickname, or if first word also matches
     words1 = norm1.split()
     words2 = norm2.split()
     if words1 and words2 and words1[-1] == words2[-1]:
-        return True
+        # Case 1: One name is just the nickname (e.g., "Heat" vs "Miami Heat")
+        if len(words1) == 1 or len(words2) == 1:
+            return True
+        # Case 2: First word also matches (e.g., "Gonzaga Bulldogs" vs "Gonzaga")
+        if words1[0] == words2[0]:
+            return True
     
     # Check if one contains the other
     if norm1 in norm2 or norm2 in norm1:
@@ -489,93 +564,101 @@ def fetch_polymarket_events_for_date(
     events_list = []
     seen_slugs = set()
     
-    # Fetch events pages
-    for active_only in (True, False):
-        if verbose:
-            print(f"  Searching {'active' if active_only else 'inactive'} events...")
-        for page in range(100):  # Search up to 100 pages
-            events = finder.fetch_events_page(
-                limit=100,
-                offset=page * 100,
-                active=active_only,
-                closed=False,
-                order="startTime",
-                ascending=False,
-            )
-            if not events:
-                break
-            
-            for event in events:
-                # Check if event is on target date
-                start = finder._parse_start_time(event)
-                if start is None:
-                    continue
-                
-                event_date = start.astimezone().date()
-                if event_date != target_date:
-                    continue
-                
-                slug_raw = event.get("slug") or ""
-                if not slug_raw:
-                    continue
-                slug = str(slug_raw).strip()
-                slug_lower = slug.lower()
-                
-                # Deduplicate
-                if slug in seen_slugs:
-                    continue
-                seen_slugs.add(slug)
-                
-                # Exclude WNBA games
-                if slug_lower.startswith("cwbb-") or slug_lower.startswith("cwbb"):
-                    continue
-                
-                # Filter by whitelisted prefixes if specified
-                if whitelisted_prefixes:
-                    matches_prefix = False
-                    for prefix in whitelisted_prefixes:
-                        prefix_lower = prefix.lower().strip()
-                        if not prefix_lower:
-                            continue
-                        # Check if slug starts with prefix or contains it with dashes
-                        if (slug_lower.startswith(prefix_lower) or 
-                            f"-{prefix_lower}-" in slug_lower or
-                            slug_lower.startswith(f"{prefix_lower}-")):
-                            matches_prefix = True
-                            break
-                    if not matches_prefix:
+    # Fetch events pages (active only; do not search inactive events)
+    if verbose:
+        print(f"  Searching active events...")
+    for page in range(100):  # Search up to 100 pages
+        events = finder.fetch_events_page(
+            limit=100,
+            offset=page * 100,
+            active=True,
+            closed=False,
+            order="startTime",
+            ascending=False,
+        )
+        if not events:
+            break
+
+        for event in events:
+            # Check if event is on target date
+            start = finder._parse_start_time(event)
+            if start is None:
+                continue
+
+            event_date = start.astimezone().date()
+            if event_date != target_date:
+                continue
+
+            slug_raw = event.get("slug") or ""
+            if not slug_raw:
+                continue
+            slug = str(slug_raw).strip()
+            slug_lower = slug.lower()
+
+            # Deduplicate
+            if slug in seen_slugs:
+                continue
+            seen_slugs.add(slug)
+
+            # Exclude WNBA games
+            if slug_lower.startswith("cwbb-") or slug_lower.startswith("cwbb"):
+                continue
+
+            # Filter by whitelisted prefixes if specified
+            if whitelisted_prefixes:
+                matches_prefix = False
+                for prefix in whitelisted_prefixes:
+                    prefix_lower = prefix.lower().strip()
+                    if not prefix_lower:
                         continue
-                
-                # Extract title
-                title_raw = event.get("title") or ""
-                if not title_raw:
-                    continue
-                title = str(title_raw).strip()
-                
-                # Exclude esports
-                title_lower = title.lower()
-                esports_keywords = ["dota", "valorant", "lol:", "league of legends", "cs:", "counter-strike", "esports"]
-                if any(x in title_lower for x in esports_keywords):
-                    continue
-                
-                # Parse team names from title
-                clean_title = title
-                for prefix in ["NBA:", "NCAA:", "NCAAB:", "NBAGL:", "Basketball:"]:
-                    if clean_title.startswith(prefix):
-                        clean_title = clean_title[len(prefix):].strip()
+                    # Check if slug starts with prefix or contains it with dashes
+                    if (slug_lower.startswith(prefix_lower) or
+                        f"-{prefix_lower}-" in slug_lower or
+                        slug_lower.startswith(f"{prefix_lower}-")):
+                        matches_prefix = True
                         break
-                
-                parts = clean_title.replace(" vs ", " @ ").replace(" vs. ", " @ ").split(" @ ", 1)
-                if len(parts) != 2:
+                if not matches_prefix:
                     continue
-                
-                away = parts[0].strip().rstrip(".")
-                home = parts[1].strip().rstrip(".")
-                
-                if away and home:
-                    events_list.append((slug, away, home))
-                    if verbose:
-                        print(f"    + Found: {slug} | {away} @ {home}")
+
+            # Extract title
+            title_raw = event.get("title") or ""
+            if not title_raw:
+                continue
+            title = str(title_raw).strip()
+
+            # Exclude esports
+            title_lower = title.lower()
+            esports_keywords = ["dota", "valorant", "lol:", "league of legends", "cs:", "counter-strike", "esports"]
+            if any(x in title_lower for x in esports_keywords):
+                continue
+
+            # Parse team names from title
+            clean_title = title
+            # Strip sport/league prefixes
+            prefixes_to_strip = [
+                "NBA:", "NCAA:", "NCAAB:", "NBAGL:", "Basketball:",
+                "Australian Open Men's:", "Australian Open Women's:",
+                "ATP:", "WTA:", "Australian Open:",
+            ]
+            for prefix in prefixes_to_strip:
+                if clean_title.startswith(prefix):
+                    clean_title = clean_title[len(prefix):].strip()
+                    break
+
+            # Also handle patterns like "Australian Open Men's: " (with space after colon)
+            clean_title = re.sub(r'^(Australian Open (Men\'s|Women\'s|Boys\'|Girls\'):\s*)', '', clean_title, flags=re.IGNORECASE)
+
+            parts = clean_title.replace(" vs ", " @ ").replace(" vs. ", " @ ").split(" @ ", 1)
+            if len(parts) != 2:
+                continue
+
+            away = parts[0].strip().rstrip(".")
+            home = parts[1].strip().rstrip(".")
+
+            if away and home:
+                events_list.append((slug, away, home))
+                if verbose:
+                    print(f"    + Found: {slug} | {away} @ {home}")
     
     if verbose:
         print(f"\n[POLYMARKET] Total events found: {len(events_list)}")
@@ -597,7 +680,9 @@ def fetch_market_slugs_by_event(event_slugs: List[str], verbose: bool = False) -
         Dict mapping event_slug -> {
             'moneyline': [market_slug],
             'spreads': [market_slug1, market_slug2, ...],
-            'totals': [market_slug1, market_slug2, ...]
+            'totals': [market_slug1, market_slug2, ...],
+            'totals_games': [...],  # tennis total games O/U
+            'totals_sets': [...],   # tennis total sets O/U
         }
     """
     if verbose:
@@ -618,16 +703,18 @@ def fetch_market_slugs_by_event(event_slugs: List[str], verbose: bool = False) -
             # Extract market slugs (event data is discarded after this)
             spreads = PolymarketMarketExtractor.spread_market_slugs_from_event(event)
             totals = PolymarketMarketExtractor.totals_market_slugs_from_event(event)
-            player_props = PolymarketMarketExtractor.player_prop_market_slugs_from_event(event)
-            
+            totals_games = PolymarketMarketExtractor.totals_games_market_slugs_from_event(event)
+            totals_sets = PolymarketMarketExtractor.totals_sets_market_slugs_from_event(event)
+
             markets = {
-                'moneyline': [event_slug],  # Moneyline uses event_slug
-                'spreads': spreads,
-                'totals': totals,
-                'player_props': player_props,
+                "moneyline": [event_slug],
+                "spreads": spreads,
+                "totals": totals,
+                "totals_games": totals_games,
+                "totals_sets": totals_sets,
             }
             market_slugs_map[event_slug] = markets
-            
+
             if verbose:
                 print(f"  [{i}/{len(event_slugs)}] {event_slug}")
                 print(f"      Moneyline: {event_slug}")
@@ -639,10 +726,10 @@ def fetch_market_slugs_by_event(event_slugs: List[str], verbose: bool = False) -
                     print(f"      Totals ({len(totals)}): {totals[:3]}..." if len(totals) > 3 else f"      Totals ({len(totals)}): {totals}")
                 else:
                     print(f"      Totals: None")
-                if player_props:
-                    print(f"      Player Props ({len(player_props)}): {player_props[:3]}..." if len(player_props) > 3 else f"      Player Props ({len(player_props)}): {player_props}")
-                else:
-                    print(f"      Player Props: None")
+                if totals_games:
+                    print(f"      Totals Games ({len(totals_games)}): {totals_games[:3]}..." if len(totals_games) > 3 else f"      Totals Games ({len(totals_games)}): {totals_games}")
+                if totals_sets:
+                    print(f"      Totals Sets ({len(totals_sets)}): {totals_sets[:3]}..." if len(totals_sets) > 3 else f"      Totals Sets ({len(totals_sets)}): {totals_sets}")
                 
         except Exception as e:
             if verbose:
@@ -672,14 +759,14 @@ def match_games_and_fetch_markets(
         1. List of (event_slug, away_team, home_team, pinnacle_game) tuples for matched games
         2. Dict mapping event_slug -> {
             'moneyline': [market_slug],
-            'spreads': [market_slug1, market_slug2, ...],
-            'totals': [market_slug1, market_slug2, ...]
+            'spreads': [...], 'totals': [...],
+            'totals_games': [...], 'totals_sets': [...]
         }
     """
     matched = []
     market_slugs_map = {}
     odds_service = PolymarketOdds()
-    
+
     for event_slug, pm_away, pm_home in polymarket_events:
         if verbose:
             print(f"  [MATCH] Trying to match Polymarket: {pm_away} @ {pm_home}")
@@ -691,20 +778,19 @@ def match_games_and_fetch_markets(
             if not pin_away or not pin_home:
                 continue
             
-            # Check both possible matchings
-            match1 = teams_match(pm_away, pin_away) and teams_match(pm_home, pin_home)
-            match2 = teams_match(pm_away, pin_home) and teams_match(pm_home, pin_away)
+            # Use strict game matching that ensures both teams match together
+            game_matches = games_match(pm_away, pm_home, pin_away, pin_home)
             
-            if verbose and not (match1 or match2):
+            if verbose and not game_matches:
                 # Only print first few non-matches to avoid spam
                 if len([g for g in pinnacle_games if g == pinnacle_game]) <= 3:
                     print(f"    [NO MATCH] vs Pinnacle: {pin_away} @ {pin_home}")
-                    print(f"      pm_away vs pin_away: {teams_match(pm_away, pin_away)}")
-                    print(f"      pm_home vs pin_home: {teams_match(pm_home, pin_home)}")
-                    print(f"      pm_away vs pin_home: {teams_match(pm_away, pin_home)}")
-                    print(f"      pm_home vs pin_away: {teams_match(pm_home, pin_away)}")
+                    print(f"      pm_away vs pin_away: {teams_match_strict(pm_away, pin_away)}")
+                    print(f"      pm_home vs pin_home: {teams_match_strict(pm_home, pin_home)}")
+                    print(f"      pm_away vs pin_home: {teams_match_strict(pm_away, pin_home)}")
+                    print(f"      pm_home vs pin_away: {teams_match_strict(pm_home, pin_away)}")
             
-            if match1 or match2:
+            if game_matches:
                 if verbose:
                     print(f"    [MATCH FOUND!] Pinnacle: {pin_away} @ {pin_home}")
                 # Use Pinnacle team names and include the full Pinnacle game object
@@ -715,10 +801,11 @@ def match_games_and_fetch_markets(
                     event = odds_service.fetch_event_by_slug(event_slug)
                     if event:
                         markets = {
-                            'moneyline': [event_slug],  # Moneyline uses event_slug
-                            'spreads': PolymarketMarketExtractor.spread_market_slugs_from_event(event),
-                            'totals': PolymarketMarketExtractor.totals_market_slugs_from_event(event),
-                            'player_props': PolymarketMarketExtractor.player_prop_market_slugs_from_event(event),
+                            "moneyline": [event_slug],
+                            "spreads": PolymarketMarketExtractor.spread_market_slugs_from_event(event),
+                            "totals": PolymarketMarketExtractor.totals_market_slugs_from_event(event),
+                            "totals_games": PolymarketMarketExtractor.totals_games_market_slugs_from_event(event),
+                            "totals_sets": PolymarketMarketExtractor.totals_sets_market_slugs_from_event(event),
                         }
                         market_slugs_map[event_slug] = markets
                 except Exception:

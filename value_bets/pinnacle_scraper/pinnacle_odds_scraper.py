@@ -44,6 +44,14 @@ DEFAULT_SOCCER_MATCHUPS_URL = "https://www.pinnacle.com/en/soccer/matchups/"
 ARCADIA_SOCCER_MATCHUPS_URL = (
     "https://guest.api.arcadia.pinnacle.com/0.1/sports/29/matchups?withSpecials=false&brandId=0"
 )
+DEFAULT_MMA_MATCHUPS_URL = "https://www.pinnacle.com/en/mixed-martial-arts/matchups/"
+ARCADIA_MMA_MATCHUPS_URL = (
+    "https://guest.api.arcadia.pinnacle.com/0.1/sports/22/matchups?withSpecials=false&brandId=0"
+)
+DEFAULT_TENNIS_MATCHUPS_URL = "https://www.pinnacle.com/en/tennis/matchups/"
+ARCADIA_TENNIS_MATCHUPS_URL = (
+    "https://guest.api.arcadia.pinnacle.com/0.1/sports/33/matchups?withSpecials=false&brandId=0"
+)
 
 
 def _now_ms() -> int:
@@ -303,6 +311,66 @@ def _list_soccer_matchups_for_local_date(
     falls on the given local_date (system local timezone).
     """
     payload = _arcadia_get_json_requests(ARCADIA_SOCCER_MATCHUPS_URL, timeout_s=timeout_s)
+    if not isinstance(payload, list):
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for m in payload:
+        if not isinstance(m, dict):
+            continue
+        st = _parse_iso_dt(m.get("startTime"))
+        if st is None:
+            continue
+        try:
+            st_local = st.astimezone()  # system local tz
+        except Exception:
+            st_local = st
+        if st_local.date() != local_date:
+            continue
+        out.append(m)
+    return out
+
+
+def _list_mma_matchups_for_local_date(
+    *,
+    local_date,
+    timeout_s: float = 20.0,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch the Arcadia MMA matchups feed and filter to matchups whose startTime
+    falls on the given local_date (system local timezone).
+    """
+    payload = _arcadia_get_json_requests(ARCADIA_MMA_MATCHUPS_URL, timeout_s=timeout_s)
+    if not isinstance(payload, list):
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for m in payload:
+        if not isinstance(m, dict):
+            continue
+        st = _parse_iso_dt(m.get("startTime"))
+        if st is None:
+            continue
+        try:
+            st_local = st.astimezone()  # system local tz
+        except Exception:
+            st_local = st
+        if st_local.date() != local_date:
+            continue
+        out.append(m)
+    return out
+
+
+def _list_tennis_matchups_for_local_date(
+    *,
+    local_date,
+    timeout_s: float = 20.0,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch the Arcadia tennis matchups feed and filter to matchups whose startTime
+    falls on the given local_date (system local timezone).
+    """
+    payload = _arcadia_get_json_requests(ARCADIA_TENNIS_MATCHUPS_URL, timeout_s=timeout_s)
     if not isinstance(payload, list):
         return []
 
@@ -763,15 +831,24 @@ def _arcadia_markets_to_rows(markets_payload: Any, *, away: str, home: str) -> L
         # Prioritize None over False (we sorted markets so None comes first)
         is_alt = bool(is_alt_raw) if is_alt_raw is not None else False
 
-        mt = _norm_key(str(m.get("type") or ""))
-        if mt not in ("moneyline", "spread", "total", "totals"):
+        mt_raw = str(m.get("type") or "").strip()
+        mt = _norm_key(mt_raw)
+        if mt not in ("moneyline", "spread", "total", "totals", "totalgames", "total games", "totalsets", "total sets"):
             continue
         prices = m.get("prices")
         if not isinstance(prices, list):
             continue
 
-        # Normalize market_type naming
-        market_type = "totals" if mt in ("total", "totals") else mt
+        # Normalize market_type: distinguish totals_games vs totals_sets for tennis
+        mt_lower = mt_raw.lower()
+        if "games" in mt_lower or mt == "totalgames":
+            market_type = "totals_games"
+        elif "sets" in mt_lower or mt == "totalsets":
+            market_type = "totals_sets"
+        elif mt in ("total", "totals"):
+            market_type = "totals"
+        else:
+            market_type = "totals"
 
         for p in prices:
             if not isinstance(p, dict):
@@ -786,6 +863,8 @@ def _arcadia_markets_to_rows(markets_payload: Any, *, away: str, home: str) -> L
                     sel = home
                 elif designation == "away":
                     sel = away
+                elif designation in ("draw", "tie"):
+                    sel = "Draw"
                 else:
                     continue
                 rows.append(
@@ -827,7 +906,7 @@ def _arcadia_markets_to_rows(markets_payload: Any, *, away: str, home: str) -> L
                         raw={"market": m, "price": p},
                     )
                 )
-            elif market_type == "totals":
+            elif market_type in ("totals", "totals_games", "totals_sets"):
                 if designation == "over":
                     sel = "Over"
                 elif designation == "under":
@@ -840,7 +919,7 @@ def _arcadia_markets_to_rows(markets_payload: Any, *, away: str, home: str) -> L
                     OddsRow(
                         away_team=away,
                         home_team=home,
-                        market_type="totals",
+                        market_type=market_type,
                         period=period,
                         period_label=period_lbl,
                         is_alternate=is_alt,
@@ -888,7 +967,7 @@ def _arcadia_markets_to_rows(markets_payload: Any, *, away: str, home: str) -> L
 class OddsRow:
     away_team: str
     home_team: str
-    market_type: str  # moneyline | spread | totals
+    market_type: str  # moneyline | spread | totals | totals_games | totals_sets
     period: int
     period_label: str
     is_alternate: bool
@@ -1022,23 +1101,7 @@ def _try_extract_market_rows(payload: Any, *, away: str, home: str) -> List[Odds
         if "spread" in mt_s:
             return "spread"
         if "total" in mt_s or "totals" in mt_s or "over" in mt_s or "under" in mt_s:
-            # Check if it's a player prop total (has player name) vs game total
-            # For now, we'll check if the market has player-related fields
-            # Player props typically have player names in the selection or market name
-            has_player = False
-            name_str = str(d.get("name") or d.get("marketName") or "").lower()
-            # Common player prop indicators
-            if any(indicator in name_str for indicator in ["player", "points", "rebounds", "assists", "threes", "steals", "blocks"]):
-                # Check if it's not a team total (team totals usually say "team total")
-                if "team total" not in name_str and "team points" not in name_str:
-                    has_player = True
-            if has_player:
-                return "player_prop"
             return "totals"
-        # Check for player prop indicators in market name/type
-        if any(indicator in mt_s for indicator in ["player", "points", "rebounds", "assists", "threes", "steals", "blocks"]):
-            if "team" not in mt_s:
-                return "player_prop"
         return None
 
     def iter_selection_like(n: Any) -> Iterable[Dict[str, Any]]:
@@ -1087,15 +1150,25 @@ def _try_extract_market_rows(payload: Any, *, away: str, home: str) -> List[Odds
             final_line = sel_line if sel_line is not None else line
 
             if mt == "moneyline":
-                # selection should match either team name
-                if name and _norm_key(name) not in (_norm_key(away_n), _norm_key(home_n)):
+                # selection should match either team name, or be "draw"/"tie" for 3-way moneyline
+                name_key = _norm_key(name) if name else ""
+                if name and name_key not in (_norm_key(away_n), _norm_key(home_n)):
                     # sometimes "Home"/"Away" are used
-                    if _norm_key(name) == "home":
+                    if name_key == "home":
                         name = home_n
-                    elif _norm_key(name) == "away":
+                    elif name_key == "away":
                         name = away_n
+                    # Check for draw/tie (3-way moneyline for soccer)
+                    elif name_key in ("draw", "tie"):
+                        name = "Draw"
                     else:
-                        continue
+                        # Also check side/designation for draw
+                        if side in ("draw", "tie"):
+                            name = "Draw"
+                        else:
+                            continue
+                elif not name and side in ("draw", "tie"):
+                    name = "Draw"
                 if not name:
                     continue
                 rows.append(
@@ -1150,33 +1223,6 @@ def _try_extract_market_rows(payload: Any, *, away: str, home: str) -> List[Odds
                         away_team=away_n,
                         home_team=home_n,
                         market_type="totals",
-                        selection=name,
-                        line=float(final_line),
-                        odds=odds,
-                        raw={"market": d, "selection": sel},
-                    )
-                )
-            elif mt == "player_prop":
-                # Player props: selection is usually "Over" or "Under", but may include player name
-                # The player name and prop type are typically in the market name/description
-                if not name:
-                    continue
-                nkey = _norm_key(name)
-                # Normalize to Over/Under
-                if "over" in nkey:
-                    name = "Over"
-                elif "under" in nkey:
-                    name = "Under"
-                if name not in ("Over", "Under"):
-                    continue
-                if final_line is None:
-                    continue
-                # Store the full market info in raw for later extraction
-                rows.append(
-                    OddsRow(
-                        away_team=away_n,
-                        home_team=home_n,
-                        market_type="player_prop",
                         selection=name,
                         line=float(final_line),
                         odds=odds,

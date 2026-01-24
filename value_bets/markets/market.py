@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import date
-from typing import Optional, Union
+from typing import Optional, Union, Set
 
 from py_clob_client.clob_types import OrderType
 from py_clob_client.order_builder.constants import BUY
@@ -144,6 +144,8 @@ class Market(ABC):
         away_team: str,
         home_team: str,
         event_slug: str,
+        market_slug: str,
+        traded_markets: Optional[Set[str]] = None,
     ) -> Optional[TradeExecutionResult]:
         """
         Execute a value bet using Kelly Criterion sizing.
@@ -152,10 +154,29 @@ class Market(ABC):
             value_bet: The value bet to execute
             away_team: Away team name
             home_team: Home team name
+            event_slug: Polymarket event slug
+            market_slug: Polymarket market slug
+            traded_markets: Optional set of market slugs to check for duplicates
             
         Returns:
             TradeExecutionResult if trade attempted, None if skipped
         """
+        # Check if we've already traded this market slug
+        if traded_markets is not None:
+            if market_slug in traded_markets:
+                if self.verbose:
+                    print(f"\n{'='*60}")
+                    print(f"[SKIP TRADE] Already traded {market_slug}")
+                    print(f"{'='*60}")
+                return None
+        
+        # Add market slug to traded_markets IMMEDIATELY to prevent duplicate trades
+        # This must happen before trade execution to prevent race conditions
+        if traded_markets is not None:
+            traded_markets.add(market_slug)
+            if self.verbose:
+                print(f"  [TRACKED] Added {market_slug} to traded_markets (before execution)")
+        
         if self.verbose:
             print(f"\n{'='*60}")
             print(f"[TRADE EXECUTION] Preparing to execute value bet")
@@ -173,11 +194,17 @@ class Market(ABC):
         
         if bankroll <= 0:
             print(f"  [SKIP TRADE] Cannot get bankroll - skipping trade")
+            # Remove from traded_markets if we're not actually trading
+            if traded_markets is not None:
+                traded_markets.discard(market_slug)
             return None
         
         if bet_size <= 0:
             print(f"  [SKIP TRADE] Kelly bet size below minimum (full Kelly: {full_kelly:.4f}, bankroll: ${bankroll:.2f})")
             print(f"    -> Calculated bet: ${bankroll * full_kelly * self.KELLY_FRACTION:.2f}, min required: ${self.MIN_BET_SIZE:.2f}")
+            # Remove from traded_markets if we're not actually trading
+            if traded_markets is not None:
+                traded_markets.discard(market_slug)
             return None
         
         # Calculate number of tokens to buy
@@ -189,6 +216,9 @@ class Market(ABC):
         # Ensure we have at least some tokens to buy
         if num_tokens < 0.01:
             print(f"  [SKIP TRADE] Token amount too small: {num_tokens}")
+            # Remove from traded_markets if we're not actually trading
+            if traded_markets is not None:
+                traded_markets.discard(market_slug)
             return None
         
         self.print_kelly_info(bet_size, full_kelly, bankroll, num_tokens)
@@ -200,7 +230,7 @@ class Market(ABC):
         elif isinstance(value_bet, TotalsValueBet):
             team = value_bet.side
         else:
-            # For PlayerPropValueBetWrapper or other custom types, try direct access
+            # For other custom types, try direct access
             try:
                 team = value_bet.team
                 if not team:
@@ -218,6 +248,7 @@ class Market(ABC):
         print(f"    Token ID: {value_bet.token_id}")
         
         # Execute trade
+        condition_id = getattr(value_bet, 'condition_id', None)
         result = self.trade_executor.execute_trade(
             token_id=value_bet.token_id,
             side=BUY,
@@ -228,6 +259,7 @@ class Market(ABC):
             game=f"{away_team} @ {home_team}",
             expected_payout_per_1=value_bet.expected_payout_per_1,
             event_slug=event_slug,
+            condition_id=condition_id,
         )
         
         # Always print trade result
@@ -264,6 +296,14 @@ class Market(ABC):
             print(f"  Team/Outcome: {team}")
             print(f"  Error: {result.error}")
         
+        # Note: market_slug was already added to traded_markets before execution
+        # If trade failed, we could remove it, but we'll keep it to prevent retrying failed trades
+        if not result.ok and traded_markets is not None:
+            # Optionally remove on failure if we want to allow retries
+            # For now, we keep it to prevent duplicate attempts
+            if self.verbose:
+                print(f"  [TRACKED] Keeping {market_slug} in traded_markets (trade failed, but preventing duplicates)")
+        
         return result
 
     @abstractmethod
@@ -274,6 +314,7 @@ class Market(ABC):
         play_date: date,
         event_slug: str,
         market_slug: str,
+        traded_markets: Optional[Set[str]] = None,
     ) -> Optional[AnyValueBet]:
         """
         Run the market flow.
@@ -284,6 +325,7 @@ class Market(ABC):
             play_date: Date of the game
             event_slug: Polymarket event slug
             market_slug: Polymarket market slug
+            traded_markets: Optional set of market slugs to check for duplicates
             
         Returns:
             Value bet if found, None otherwise
