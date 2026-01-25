@@ -50,12 +50,40 @@ class PolymarketGameFinder:
             response = self.session.get(url, params=params)
             response.raise_for_status()
             data = response.json()
+            
             if isinstance(data, list):
                 return data
             return data.get("data", []) or []
         except requests.exceptions.RequestException as e:
             print(f"Error fetching events: {e}")
             return []
+
+    TARGET_SLUG = "cbb-stfpa-chist-2026-01-29"
+
+    def _print_events_readable(self, data: Any) -> None:
+        """Print human-readable summary + full JSON only when target slug is present."""
+        events = data if isinstance(data, list) else (data.get("data") or data.get("events") or [])
+        if not isinstance(events, list):
+            return
+        has_target = any(
+            (evt.get("slug") or "").strip() == self.TARGET_SLUG
+            for evt in events
+        )
+        if not has_target:
+            return
+
+        print(f"\n=== Fetched {len(events)} events ===")
+        for i, evt in enumerate(events, 1):
+            title = (evt.get("title") or "").strip() or "(no title)"
+            slug = (evt.get("slug") or "").strip() or "(no slug)"
+            start = self._parse_start_time(evt)
+            start_str = start.strftime("%Y-%m-%d %H:%M UTC") if start else "?"
+            markets = evt.get("markets") or []
+            n_markets = len(markets) if isinstance(markets, list) else 0
+            print(f"  {i}. {title}")
+            print(f"      slug: {slug}  |  start: {start_str}  |  markets: {n_markets}")
+        print("\n--- Full JSON ---")
+        print(json.dumps(data, indent=2, default=str))
 
     @staticmethod
     def _normalize(s: str) -> str:

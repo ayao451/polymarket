@@ -807,7 +807,11 @@ def _arcadia_markets_to_rows(markets_payload: Any, *, away: str, home: str) -> L
 
         # Normalize market_type: distinguish totals_games vs totals_sets for tennis
         mt_lower = mt_raw.lower()
-        if "games" in mt_lower or mt == "totalgames":
+        if mt == "moneyline":
+            market_type = "moneyline"
+        elif mt == "spread":
+            market_type = "spread"
+        elif "games" in mt_lower or mt == "totalgames":
             market_type = "totals_games"
         elif "sets" in mt_lower or mt == "totalsets":
             market_type = "totals_sets"

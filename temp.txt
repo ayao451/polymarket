@@ -1,0 +1,8 @@
+--- MONEYLINE ---
+Golden State Warriors: 0.364964 to win $1 | Minnesota Timberwolves: 0.662162 to win $1
+
+--- SPREADS ---
+Golden State Warriors (+6): 0.526066 to win $1 | Minnesota Timberwolves (-6): 0.497512 to win $1
+
+--- TOTALS ---
+(no totals)
