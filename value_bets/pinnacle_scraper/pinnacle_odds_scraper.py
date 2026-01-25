@@ -40,10 +40,6 @@ DEFAULT_HOCKEY_MATCHUPS_URL = "https://www.pinnacle.com/en/hockey/matchups/"
 ARCADIA_HOCKEY_MATCHUPS_URL = (
     "https://guest.api.arcadia.pinnacle.com/0.1/sports/19/matchups?withSpecials=false&brandId=0"
 )
-DEFAULT_SOCCER_MATCHUPS_URL = "https://www.pinnacle.com/en/soccer/matchups/"
-ARCADIA_SOCCER_MATCHUPS_URL = (
-    "https://guest.api.arcadia.pinnacle.com/0.1/sports/29/matchups?withSpecials=false&brandId=0"
-)
 DEFAULT_MMA_MATCHUPS_URL = "https://www.pinnacle.com/en/mixed-martial-arts/matchups/"
 ARCADIA_MMA_MATCHUPS_URL = (
     "https://guest.api.arcadia.pinnacle.com/0.1/sports/22/matchups?withSpecials=false&brandId=0"
@@ -281,36 +277,6 @@ def _list_hockey_matchups_for_local_date(
     falls on the given local_date (system local timezone).
     """
     payload = _arcadia_get_json_requests(ARCADIA_HOCKEY_MATCHUPS_URL, timeout_s=timeout_s)
-    if not isinstance(payload, list):
-        return []
-
-    out: List[Dict[str, Any]] = []
-    for m in payload:
-        if not isinstance(m, dict):
-            continue
-        st = _parse_iso_dt(m.get("startTime"))
-        if st is None:
-            continue
-        try:
-            st_local = st.astimezone()  # system local tz
-        except Exception:
-            st_local = st
-        if st_local.date() != local_date:
-            continue
-        out.append(m)
-    return out
-
-
-def _list_soccer_matchups_for_local_date(
-    *,
-    local_date,
-    timeout_s: float = 20.0,
-) -> List[Dict[str, Any]]:
-    """
-    Fetch the Arcadia soccer matchups feed and filter to matchups whose startTime
-    falls on the given local_date (system local timezone).
-    """
-    payload = _arcadia_get_json_requests(ARCADIA_SOCCER_MATCHUPS_URL, timeout_s=timeout_s)
     if not isinstance(payload, list):
         return []
 
@@ -1150,25 +1116,18 @@ def _try_extract_market_rows(payload: Any, *, away: str, home: str) -> List[Odds
             final_line = sel_line if sel_line is not None else line
 
             if mt == "moneyline":
-                # selection should match either team name, or be "draw"/"tie" for 3-way moneyline
+                # selection should match either team name; skip draw/tie (3-way) outcomes
                 name_key = _norm_key(name) if name else ""
+                if name_key in ("draw", "tie") or side in ("draw", "tie"):
+                    continue
                 if name and name_key not in (_norm_key(away_n), _norm_key(home_n)):
                     # sometimes "Home"/"Away" are used
                     if name_key == "home":
                         name = home_n
                     elif name_key == "away":
                         name = away_n
-                    # Check for draw/tie (3-way moneyline for soccer)
-                    elif name_key in ("draw", "tie"):
-                        name = "Draw"
                     else:
-                        # Also check side/designation for draw
-                        if side in ("draw", "tie"):
-                            name = "Draw"
-                        else:
-                            continue
-                elif not name and side in ("draw", "tie"):
-                    name = "Draw"
+                        continue
                 if not name:
                     continue
                 rows.append(

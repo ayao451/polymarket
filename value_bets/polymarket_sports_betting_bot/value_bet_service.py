@@ -110,16 +110,8 @@ class ValueBetService:
 
         # Check if first word matches (for NCAA: school name is usually first word)
         # e.g., "Gonzaga" matches "Gonzaga Bulldogs"
-        if words_full and words_outcome:
-            if words_full[0] == words_outcome[0] and len(words_full[0]) > 3:
-                return True
-            # For soccer: "Brighton & Hove Albion" vs "Brighton"
-            if len(words_full) > 1 and len(words_outcome) == 1:
-                if words_full[0] == words_outcome[0]:
-                    return True
-            if len(words_outcome) > 1 and len(words_full) == 1:
-                if words_outcome[0] == words_full[0]:
-                    return True
+        if words_full and words_outcome and words_full[0] == words_outcome[0] and len(words_full[0]) > 3:
+            return True
 
         # Check if all words from shorter name are in longer name
         # e.g., "Trail Blazers" matches "Portland Trail Blazers"

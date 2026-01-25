@@ -104,31 +104,3 @@ class PlayerPropOdds:
     
     def __str__(self) -> str:
         return self.to_string()
-
-
-@dataclass(frozen=True)
-class ThreeWayMoneylineOdds:
-    """
-    3-way moneyline odds for soccer (away win, draw, home win).
-    
-    outcome_1 = away_team
-    outcome_2 = "Draw"
-    outcome_3 = home_team
-    """
-    away_team: str
-    home_team: str
-    outcome_1_cost_to_win_1: float  # away team
-    outcome_2_cost_to_win_1: float  # draw
-    outcome_3_cost_to_win_1: float  # home team
-    
-    def to_string(self, decimals: int = 6) -> str:
-        decimals = max(0, int(decimals))
-        fmt = f".{decimals}f"
-        return (
-            f"{self.away_team}: {format(self.outcome_1_cost_to_win_1, fmt)} to win $1 | "
-            f"Draw: {format(self.outcome_2_cost_to_win_1, fmt)} to win $1 | "
-            f"{self.home_team}: {format(self.outcome_3_cost_to_win_1, fmt)} to win $1"
-        )
-    
-    def __str__(self) -> str:
-        return self.to_string()

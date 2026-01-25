@@ -11,8 +11,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Optional
 
-from .pinnacle_odds_service import PinnacleBasketballOddsService, PinnacleHockeyOddsService, PinnacleSoccerOddsService, PinnacleMMAOddsService, PinnacleTennisOddsService
-from .sportsbook_odds import SportsbookOdds, HandicapOdds, TotalOdds, ThreeWayMoneylineOdds
+from .pinnacle_odds_service import PinnacleBasketballOddsService, PinnacleHockeyOddsService, PinnacleMMAOddsService, PinnacleTennisOddsService
+from .sportsbook_odds import SportsbookOdds, HandicapOdds, TotalOdds
 
 def _cost_to_win_1(decimal_odds: float) -> Optional[float]:
     try:
@@ -37,25 +37,24 @@ class PinnacleSportsbookOddsInterface:
     def __init__(self, sport: str, timeout_ms: int = 45000) -> None:
         """
         Initialize the interface.
-        
+
         Args:
             timeout_ms: Timeout for API requests
-            service: Optional pre-instantiated service (basketball, hockey, or soccer). If None, creates based on sport.
-            sport: Sport type ("basketball", "hockey", or "soccer"). Ignored if service is provided.
+            sport: Sport type ("basketball", "hockey", "ufc", "mma", or "tennis").
         """
         self.sport = sport.lower()
         if self.sport == "hockey":
             self._svc = PinnacleHockeyOddsService(timeout_ms=timeout_ms)
         elif self.sport == "basketball":
             self._svc = PinnacleBasketballOddsService(timeout_ms=timeout_ms)
-        elif self.sport == "soccer":
-            self._svc = PinnacleSoccerOddsService(timeout_ms=timeout_ms)
         elif self.sport == "ufc" or self.sport == "mma":
             self._svc = PinnacleMMAOddsService(timeout_ms=timeout_ms)
         elif self.sport == "tennis":
             self._svc = PinnacleTennisOddsService(timeout_ms=timeout_ms)
         else:
-            raise ValueError(f"Unsupported sport: {sport}. Must be 'basketball', 'hockey', or 'soccer'")
+            raise ValueError(
+                f"Unsupported sport: {sport}. Must be 'basketball', 'hockey', 'ufc', 'mma', or 'tennis'"
+            )
 
     def _find_game_and_rows(
         self,
@@ -122,37 +121,6 @@ class PinnacleSportsbookOddsInterface:
                     outcome_2=home_team,
                     outcome_1_cost_to_win_1=float(ac),
                     outcome_2_cost_to_win_1=float(hc),
-                )
-        return None
-
-    def get_three_way_moneyline_odds(
-        self,
-        team_a: str,
-        team_b: str,
-        play_date: Optional[date] = None,
-    ) -> Optional[ThreeWayMoneylineOdds]:
-        """Fetch 3-way moneyline odds for a soccer game (away, draw, home)."""
-        result = self._find_game_and_rows(team_a, team_b, play_date)
-        if result is None:
-            return None
-
-        away_team, home_team, rows = result
-
-        ml_away = next((r for r in rows if r.market_type == "moneyline" and _norm(r.selection) == _norm(away_team)), None)
-        ml_draw = next((r for r in rows if r.market_type == "moneyline" and (_norm(r.selection) == "draw" or _norm(r.selection) == "tie")), None)
-        ml_home = next((r for r in rows if r.market_type == "moneyline" and _norm(r.selection) == _norm(home_team)), None)
-
-        if ml_away and ml_draw and ml_home and ml_away.odds and ml_draw.odds and ml_home.odds:
-            ac = _cost_to_win_1(float(ml_away.odds))
-            dc = _cost_to_win_1(float(ml_draw.odds))
-            hc = _cost_to_win_1(float(ml_home.odds))
-            if ac is not None and dc is not None and hc is not None:
-                return ThreeWayMoneylineOdds(
-                    away_team=away_team,
-                    home_team=home_team,
-                    outcome_1_cost_to_win_1=float(ac),
-                    outcome_2_cost_to_win_1=float(dc),
-                    outcome_3_cost_to_win_1=float(hc),
                 )
         return None
 

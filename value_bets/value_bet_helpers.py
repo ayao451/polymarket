@@ -282,13 +282,7 @@ def log_value_bet(
 
 def normalize_team_name(s: str) -> str:
     """Normalize team name for matching. Assumes input is already stripped."""
-    normalized = " ".join(str(s).lower().split())
-    # Remove common suffixes for soccer teams
-    suffixes = [" fc", " football club", " united", " city", " town", " rovers", " wanderers", " athletic"]
-    for suffix in suffixes:
-        if normalized.endswith(suffix):
-            normalized = normalized[:-len(suffix)].strip()
-    return normalized
+    return " ".join(str(s).lower().split())
 
 
 def games_match(
@@ -344,14 +338,6 @@ def teams_match_strict(team1: str, team2: str) -> bool:
     if norm1.startswith(norm2) or norm2.startswith(norm1):
         return True
     
-    # For soccer teams, check common patterns
-    norm1_clean = norm1.replace("&", "").replace(" and ", " ")
-    norm2_clean = norm2.replace("&", "").replace(" and ", " ")
-    if norm1_clean == norm2_clean:
-        return True
-    if norm1_clean.startswith(norm2_clean) or norm2_clean.startswith(norm1_clean):
-        return True
-    
     words1 = norm1.split()
     words2 = norm2.split()
     
@@ -368,20 +354,10 @@ def teams_match_strict(team1: str, team2: str) -> bool:
     # Check if one contains the other (but require at least one distinctive word to match)
     if norm1 in norm2 or norm2 in norm1:
         return True
-    if norm1_clean in norm2_clean or norm2_clean in norm1_clean:
-        return True
     
-    # Check if first word matches (for NCAA/international/soccer)
-    if words1 and words2:
-        if words1[0] == words2[0] and len(words1[0]) > 3:
-            return True
-        # For soccer: "Brighton & Hove Albion" vs "Brighton"
-        if len(words1) > 1 and len(words2) == 1:
-            if words1[0] == words2[0]:
-                return True
-        if len(words2) > 1 and len(words1) == 1:
-            if words2[0] == words1[0]:
-                return True
+    # Check if first word matches (for NCAA/international)
+    if words1 and words2 and words1[0] == words2[0] and len(words1[0]) > 3:
+        return True
     
     # Check if all words from shorter name are in longer name
     if len(words1) > 1 and len(words2) > 1:
@@ -390,7 +366,7 @@ def teams_match_strict(team1: str, team2: str) -> bool:
         if all(word in longer for word in shorter if len(word) > 2):
             return True
     
-    # For soccer: check if FIRST key word matches (the distinctive identifier)
+    # Check if FIRST key word matches (the distinctive identifier).
     # This prevents matching teams that only share a location name
     key_words1 = [w for w in words1 if len(w) > 3]
     key_words2 = [w for w in words2 if len(w) > 3]
@@ -407,32 +383,21 @@ def teams_match_strict(team1: str, team2: str) -> bool:
 def teams_match(team1: str, team2: str) -> bool:
     """
     Check if two team names match (fuzzy matching).
-    
+
     Handles cases where:
     - Pinnacle: "Gonzaga" (school name only)
     - Polymarket: "Gonzaga Bulldogs" (school name + team name)
-    - Soccer: "Brighton & Hove Albion FC" vs "Brighton"
-    - Soccer: "AFC Bournemouth" vs "Bournemouth"
     """
     norm1 = normalize_team_name(team1)
     norm2 = normalize_team_name(team2)
-    
+
     if norm1 == norm2:
         return True
-    
+
     # Check if one name starts with the other
     if norm1.startswith(norm2) or norm2.startswith(norm1):
         return True
-    
-    # For soccer teams, check common patterns
-    # Remove "&" and normalize
-    norm1_clean = norm1.replace("&", "").replace(" and ", " ")
-    norm2_clean = norm2.replace("&", "").replace(" and ", " ")
-    if norm1_clean == norm2_clean:
-        return True
-    if norm1_clean.startswith(norm2_clean) or norm2_clean.startswith(norm1_clean):
-        return True
-    
+
     # Check if last word matches (nickname matching)
     # Only match if one name is just the nickname, or if first word also matches
     words1 = norm1.split()
@@ -448,40 +413,18 @@ def teams_match(team1: str, team2: str) -> bool:
     # Check if one contains the other
     if norm1 in norm2 or norm2 in norm1:
         return True
-    if norm1_clean in norm2_clean or norm2_clean in norm1_clean:
+
+    # Check if first word matches (for NCAA/international)
+    if words1 and words2 and words1[0] == words2[0] and len(words1[0]) > 3:
         return True
-    
-    # Check if first word matches (for NCAA/international/soccer)
-    if words1 and words2:
-        if words1[0] == words2[0] and len(words1[0]) > 3:
-            return True
-        # For soccer: "Brighton & Hove Albion" vs "Brighton"
-        if len(words1) > 1 and len(words2) == 1:
-            if words1[0] == words2[0]:
-                return True
-        if len(words2) > 1 and len(words1) == 1:
-            if words2[0] == words1[0]:
-                return True
-    
+
     # Check if all words from shorter name are in longer name
     if len(words1) > 1 and len(words2) > 1:
         shorter = words1 if len(words1) < len(words2) else words2
         longer = words2 if len(words1) < len(words2) else words1
         if all(word in longer for word in shorter if len(word) > 2):
             return True
-    
-    # For soccer: check if key words match (e.g., "Brighton" in "Brighton & Hove Albion")
-    key_words1 = [w for w in words1 if len(w) > 3]
-    key_words2 = [w for w in words2 if len(w) > 3]
-    if key_words1 and key_words2:
-        # If any key word from one appears in the other
-        for kw in key_words1:
-            if kw in norm2:
-                return True
-        for kw in key_words2:
-            if kw in norm1:
-                return True
-    
+
     return False
 
 
