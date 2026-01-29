@@ -20,6 +20,7 @@ class Sport(Enum):
     HOCKEY = "hockey"
     TENNIS = "tennis"
     UFC = "ufc"
+    SOCCER = "soccer"
 
 @dataclass
 class MarketOdds:

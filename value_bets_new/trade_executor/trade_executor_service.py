@@ -14,6 +14,7 @@ Credentials are read from `config_local.py` (optional) or env vars:
 
 from __future__ import annotations
 
+import math
 import traceback
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
@@ -57,7 +58,6 @@ class TradeExecutorService:
     # Kelly fraction: use fractional Kelly for safety (1.0 = full Kelly)
     KELLY_FRACTION = 1.0
     MIN_BET_SIZE = 1.0  # Minimum bet in USDC
-    MAX_BET_FRACTION = 0.10  # Never bet more than 10% of bankroll
     
     def __init__(self, trader: Optional[PolymarketTrader] = None) -> None:
         # Don't raise on init; keep it safe for callers.
@@ -66,9 +66,11 @@ class TradeExecutorService:
         if trader is None:
             try:
                 self._trader = PolymarketTrader()
+                print(f"[DEBUG] [TradeExecutor] Trader initialized successfully")
             except Exception as e:
                 self._trader = None
                 self._init_error = str(e)
+                print(f"[DEBUG] [TradeExecutor] Trader initialization failed: {e}")
 
     @staticmethod
     def kelly_criterion(true_prob: float, price: float) -> float:
@@ -107,19 +109,25 @@ class TradeExecutorService:
         Returns:
             Tuple of (bet_size, bankroll) or (0, 0) if can't bet
         """
+        print(f"[DEBUG] [TradeExecutor] calculate_bet_size: true_prob={true_prob:.4f}, price={price:.4f}")
         bankroll = self.get_usdc_balance()
+        print(f"[DEBUG] [TradeExecutor] Bankroll: {bankroll}")
         if bankroll is None or bankroll <= 0:
+            print(f"[DEBUG] [TradeExecutor] Bankroll is None or <= 0, returning (0, 0)")
             return 0.0, 0.0
         
         full_kelly = self.kelly_criterion(true_prob, price)
+        print(f"[DEBUG] [TradeExecutor] Full Kelly: {full_kelly:.4f}")
         kelly_fraction = full_kelly * self.KELLY_FRACTION  # Use fractional Kelly
+        print(f"[DEBUG] [TradeExecutor] Kelly fraction (after KELLY_FRACTION={self.KELLY_FRACTION}): {kelly_fraction:.4f}")
         
-        # Apply bet size constraints
-        max_bet = bankroll * self.MAX_BET_FRACTION
+        # Calculate bet size based on Kelly
         kelly_bet = bankroll * kelly_fraction
+        print(f"[DEBUG] [TradeExecutor] kelly_bet: {kelly_bet:.4f}")
         
-        bet_size = min(kelly_bet, max_bet)
-        bet_size = max(bet_size, self.MIN_BET_SIZE) if kelly_bet >= self.MIN_BET_SIZE else 0
+        # Apply minimum bet size constraint
+        bet_size = max(kelly_bet, self.MIN_BET_SIZE) if kelly_bet >= self.MIN_BET_SIZE else 0
+        print(f"[DEBUG] [TradeExecutor] Final bet_size (after MIN_BET_SIZE={self.MIN_BET_SIZE} constraint): {bet_size:.4f}")
         
         return bet_size, bankroll
 
@@ -129,15 +137,11 @@ class TradeExecutorService:
         Returns None if unavailable.
         """
         if self._trader is None:
-            if self._init_error:
-                print(f"Trade executor not initialized: {self._init_error}")
             return None
         try:
             balance = self._trader.get_usdc_balance()
             return float(balance)
-        except Exception as e:
-            print(f"Error fetching USDC balance: {e}")
-            traceback.print_exc()
+        except Exception:
             return None
 
     def execute_trade(
@@ -158,18 +162,26 @@ class TradeExecutorService:
 
         This method does not refetch any event/market info; it requires `token_id`.
         """
+        print(f"[DEBUG] [TradeExecutor] execute_trade called: token_id={token_id}, side={side}, price={price:.4f}, size={size:.4f}")
+        
         if self._trader is None:
+            print(f"[DEBUG] [TradeExecutor] execute_trade REJECTED: trader is None")
             return None
         if side not in (BUY, SELL):
+            print(f"[DEBUG] [TradeExecutor] execute_trade REJECTED: side ({side}) not in (BUY, SELL)")
             return None
         if not token_id:
+            print(f"[DEBUG] [TradeExecutor] execute_trade REJECTED: token_id is empty")
             return None
         if price <= 0:
+            print(f"[DEBUG] [TradeExecutor] execute_trade REJECTED: price ({price:.4f}) <= 0")
             return None
         if size <= 0:
+            print(f"[DEBUG] [TradeExecutor] execute_trade REJECTED: size ({size:.4f}) <= 0")
             return None
 
         try:
+            print(f"[DEBUG] [TradeExecutor] Calling trader.execute_trade...")
             resp = self._trader.execute_trade(
                 side=side,
                 price=price,
@@ -177,6 +189,7 @@ class TradeExecutorService:
                 token_id=token_id,
                 order_type=order_type,
             )
+            print(f"[DEBUG] [TradeExecutor] Trade response: {resp}")
             
             # Extract filled size from response (for FAK partial fills)
             filled_size: Optional[float] = None
@@ -192,6 +205,8 @@ class TradeExecutorService:
                 # If no explicit matched amount but status is "matched", assume full fill
                 if filled_size is None and resp.get("status") == "matched":
                     filled_size = size
+                
+                print(f"[DEBUG] [TradeExecutor] Extracted filled_size: {filled_size}, status: {resp.get('status')}")
             
             result = TradeExecutionResult(
                 token_id=token_id,
@@ -205,8 +220,12 @@ class TradeExecutorService:
                 filled_size=filled_size,
                 condition_id=condition_id,
             )
+            print(f"[DEBUG] [TradeExecutor] Created TradeExecutionResult successfully")
             return result
         except Exception as e:
+            print(f"[DEBUG] [TradeExecutor] Exception during trade execution: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def execute_value_bet(
@@ -224,40 +243,56 @@ class TradeExecutorService:
         Returns:
             TradeExecutionResult if trade was attempted, None if skipped
         """
+        print(f"[DEBUG] [TradeExecutor] execute_value_bet called for team: {value_bet.team}")
+        print(f"[DEBUG] [TradeExecutor] Value bet details: true_prob={value_bet.true_prob:.4f}, best_ask={value_bet.polymarket_best_ask:.4f}, expected_payout={value_bet.expected_payout_per_1:.4f}")
+        
+        # Check if trader is initialized
+        if self._trader is None:
+            print(f"[DEBUG] [TradeExecutor] REJECTED: trader is None (init_error: {self._init_error})")
+            return None
+        
         # Calculate Kelly bet size
+        print(f"[DEBUG] [TradeExecutor] Calculating bet size using Kelly Criterion...")
         bet_size, bankroll = self.calculate_bet_size(
             value_bet.true_prob,
             value_bet.polymarket_best_ask
         )
+        print(f"[DEBUG] [TradeExecutor] Calculated bet_size: {bet_size:.4f}, bankroll: {bankroll:.4f}")
         
-        if bet_size <= 0 or bankroll <= 0:
-            print(f"[SKIP TRADE] Bet size too small or no bankroll: bet_size={bet_size}, bankroll={bankroll}")
+        if bet_size <= 0:
+            print(f"[DEBUG] [TradeExecutor] REJECTED: bet_size ({bet_size:.4f}) <= 0")
+            return None
+        
+        if bankroll <= 0:
+            print(f"[DEBUG] [TradeExecutor] REJECTED: bankroll ({bankroll:.4f}) <= 0")
             return None
         
         # Calculate number of tokens to buy
         num_tokens = math.floor(bet_size / value_bet.polymarket_best_ask) + 1
         price = round(value_bet.polymarket_best_ask, 4)
+        print(f"[DEBUG] [TradeExecutor] Calculated num_tokens: {num_tokens:.4f}, price: {price:.4f}")
         
         if num_tokens < 0.01:
-            print(f"[SKIP TRADE] Token amount too small: {num_tokens}")
+            print(f"[DEBUG] [TradeExecutor] REJECTED: num_tokens ({num_tokens:.4f}) < 0.01")
             return None
         
         # Execute the trade
+        print(f"[DEBUG] [TradeExecutor] Executing trade: token_id={value_bet.token_id}, side=BUY, price={price:.4f}, size={num_tokens:.4f}, order_type=FAK")
         trade_result = self.execute_trade(
             token_id=value_bet.token_id,
             side=BUY,
             price=price,
             size=num_tokens,
-            order_type=OrderType.FOK,
+            order_type=OrderType.FAK,
             team=value_bet.team,
             game=game_str,
             expected_payout_per_1=value_bet.expected_payout_per_1,
             condition_id=value_bet.condition_id,
         )
         
-        if trade_result is not None:
-            print(f"[SUCCESS] Trade executed: {value_bet.team} - ${bet_size:.2f} ({num_tokens:.2f} tokens)")
+        if trade_result is None:
+            print(f"[DEBUG] [TradeExecutor] Trade execution returned None")
         else:
-            print(f"[FAILED] Trade failed")
+            print(f"[DEBUG] [TradeExecutor] Trade execution successful: size={trade_result.size:.4f}, price={trade_result.price:.4f}, filled_size={trade_result.filled_size}")
         
         return trade_result

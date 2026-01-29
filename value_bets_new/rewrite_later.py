@@ -164,6 +164,39 @@ class PolymarketGameFinder:
 
     def __init__(self) -> None:
         self.session = requests.Session()
+    
+    def _retry_request(self, method: str, url: str, max_retries: int = 3, **kwargs) -> Optional[requests.Response]:
+        """
+        Retry HTTP requests with exponential backoff for connection errors.
+        
+        Args:
+            method: HTTP method ('get', 'post', etc.)
+            url: URL to request
+            max_retries: Maximum number of retry attempts
+            **kwargs: Additional arguments to pass to requests method
+            
+        Returns:
+            Response object or None if all retries failed
+        """
+        import time
+        for attempt in range(max_retries):
+            try:
+                response = getattr(self.session, method.lower())(url, **kwargs)
+                response.raise_for_status()
+                return response
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    print(f"[DEBUG] [PolymarketGameFinder] Connection error (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"[DEBUG] [PolymarketGameFinder] Connection error after {max_retries} attempts: {e}")
+                    raise
+            except requests.exceptions.HTTPError as e:
+                # Don't retry HTTP errors (4xx, 5xx) - these are not transient
+                print(f"[DEBUG] [PolymarketGameFinder] HTTP error: {e}")
+                raise
+        return None
 
     def fetch_events_page(
         self,
@@ -191,15 +224,15 @@ class PolymarketGameFinder:
         }
 
         try:
-            response = self.session.get(url, params=params)
-            response.raise_for_status()
+            response = self._retry_request('get', url, params=params)
+            if response is None:
+                return []
             data = response.json()
             
             if isinstance(data, list):
                 return data
             return data.get("data", []) or []
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching events: {e}")
+        except requests.exceptions.RequestException:
             return []
 
     TARGET_SLUG = "cbb-stfpa-chist-2026-01-29"
@@ -215,19 +248,6 @@ class PolymarketGameFinder:
         )
         if not has_target:
             return
-
-        print(f"\n=== Fetched {len(events)} events ===")
-        for i, evt in enumerate(events, 1):
-            title = (evt.get("title") or "").strip() or "(no title)"
-            slug = (evt.get("slug") or "").strip() or "(no slug)"
-            start = self._parse_start_time(evt)
-            start_str = start.strftime("%Y-%m-%d %H:%M UTC") if start else "?"
-            markets = evt.get("markets") or []
-            n_markets = len(markets) if isinstance(markets, list) else 0
-            print(f"  {i}. {title}")
-            print(f"      slug: {slug}  |  start: {start_str}  |  markets: {n_markets}")
-        print("\n--- Full JSON ---")
-        print(json.dumps(data, indent=2, default=str))
 
     @staticmethod
     def _normalize(s: str) -> str:

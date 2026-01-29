@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Optional
 
-from value_bets_new.pinnacle_odds_service import PinnacleBasketballOddsService, PinnacleHockeyOddsService, PinnacleMMAOddsService, PinnacleTennisOddsService
+from value_bets_new.pinnacle_odds_service import PinnacleBasketballOddsService, PinnacleHockeyOddsService, PinnacleMMAOddsService, PinnacleTennisOddsService, PinnacleSoccerOddsService
 from value_bets_new.constants import Sport, SportsbookOdds, HandicapOdds, TotalOdds
 
 def _cost_to_win_1(decimal_odds: float) -> Optional[float]:
@@ -51,9 +51,11 @@ class PinnacleSportsbookOddsInterface:
             self._svc = PinnacleMMAOddsService(timeout_ms=timeout_ms)
         elif sport == Sport.TENNIS:
             self._svc = PinnacleTennisOddsService(timeout_ms=timeout_ms)
+        elif sport == Sport.SOCCER:
+            self._svc = PinnacleSoccerOddsService(timeout_ms=timeout_ms)
         else:
             raise ValueError(
-                f"Unsupported sport: {sport}. Must be Sport.BASKETBALL, Sport.HOCKEY, Sport.UFC, or Sport.TENNIS"
+                f"Unsupported sport: {sport}. Must be Sport.BASKETBALL, Sport.HOCKEY, Sport.UFC, Sport.TENNIS, or Sport.SOCCER"
             )
 
     def _find_game_and_rows(
@@ -66,17 +68,66 @@ class PinnacleSportsbookOddsInterface:
         Find the matching game and return (away_team, home_team, market_rows).
         Returns None if game not found or odds fetch fails.
         """
-        local_date = play_date
-        games = self._svc.list_games_for_date(local_date)
+        # Try both the play_date and the day before (in case of timezone differences)
+        from datetime import timedelta
+        dates_to_try = [play_date, play_date - timedelta(days=1), play_date + timedelta(days=1)]
+        games = []
+        for local_date in dates_to_try:
+            date_games = self._svc.list_games_for_date(local_date)
+            games.extend(date_games)
 
         ta = _norm(team_a)
         tb = _norm(team_b)
 
+        def _team_matches(t1: str, t2: str) -> bool:
+            """Fuzzy team name matching."""
+            n1 = _norm(t1)
+            n2 = _norm(t2)
+            if n1 == n2:
+                return True
+            # Check if one contains the other
+            if n1 in n2 or n2 in n1:
+                return True
+            # Check if last word matches (nickname)
+            words1 = n1.split()
+            words2 = n2.split()
+            if words1 and words2 and words1[-1] == words2[-1]:
+                # One is just nickname, or first word matches
+                if len(words1) == 1 or len(words2) == 1:
+                    return True
+                if words1[0] == words2[0]:
+                    return True
+            # Check if first word matches (for school/city names)
+            if words1 and words2 and words1[0] == words2[0] and len(words1[0]) > 3:
+                return True
+            # Check if all words from shorter are in longer
+            if len(words1) > 1 and len(words2) > 1:
+                shorter = words1 if len(words1) < len(words2) else words2
+                longer = words2 if len(words1) < len(words2) else words1
+                if all(word in longer for word in shorter if len(word) > 2):
+                    return True
+            return False
+        
         match = None
         for g in games:
             a = _norm(g.away_team)
             h = _norm(g.home_team)
+            
+            # Try exact match first
             if (a == ta and h == tb) or (a == tb and h == ta) or (h == ta and a == tb) or (h == tb and a == ta):
+                match = g
+                break
+            
+            # Try fuzzy match - check all combinations
+            ta_matches_a = _team_matches(ta, a)
+            ta_matches_h = _team_matches(ta, h)
+            tb_matches_a = _team_matches(tb, a)
+            tb_matches_h = _team_matches(tb, h)
+            
+            if (ta_matches_a and tb_matches_h) or \
+               (ta_matches_h and tb_matches_a) or \
+               (tb_matches_a and ta_matches_h) or \
+               (tb_matches_h and ta_matches_a):
                 match = g
                 break
 
@@ -85,11 +136,7 @@ class PinnacleSportsbookOddsInterface:
 
         try:
             res = self._svc.get_game_odds(match.matchup_id, game_info=match)
-        except RuntimeError as e:
-            print(
-                f"Warning: failed to fetch Pinnacle odds for {match.away_team} @ {match.home_team} "
-                f"(matchup_id={match.matchup_id}): {e}"
-            )
+        except Exception:
             return None
 
         # Only full-game (period=0) markets are used for Polymarket matching.

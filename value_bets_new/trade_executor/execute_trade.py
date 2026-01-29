@@ -83,7 +83,6 @@ class PolymarketTrader:
 
         # Post the order with the specified order type
         resp = self.client.post_order(signed_order, order_type)
-        print(resp)
         
         return resp
 
